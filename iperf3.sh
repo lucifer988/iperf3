@@ -2,26 +2,17 @@
 # iperf3.sh
 #
 # 单流反向 (-R) iperf3 自动调优脚本（海外 server -> 大陆 client）
-#
-# 设计原则：
-# 1) 在 -R 模式下，真正大发送端是 server，client 主要是接收端。
-#    因此默认优先优化 client 侧接收缓冲 / 窗口，而不是浪费时间全量扫本地 cc/qdisc。
-# 2) 使用“两阶段搜索”：先短测粗筛，再对前几名复测，显著缩短总耗时。
-# 3) 默认只改测试真正需要的 sysctl，并且支持自动回滚、保留、持久化。
-# 4) 高级模式可额外扫描本地 cc/qdisc，但这在 -R 场景下通常是次要因素，会显著增加耗时。
-#
-# 建议：
-# - 本脚本运行在「大陆 client」上。
-# - 海外 server 端请提前启动：iperf3 -s -p 5201
-# - 若你也能控制 server，真正影响 -R 大发送流拥塞控制/零拷贝/CPU 绑核的优化应优先在 server 端完成。
 
 set -Eeuo pipefail
 shopt -s extglob
 unalias -a 2>/dev/null || true
+
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export LC_ALL=C
+export LANG=C
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="5.0.0"
+SCRIPT_VERSION="5.0.1"
 TTY="/dev/tty"
 
 IPERF3_BIN="/usr/bin/iperf3"
@@ -73,7 +64,7 @@ RESTORE_AT_EXIT=1
 PERSIST_DONE=0
 RUN_INDEX=0
 
-# 只备份/恢复真正会动到的 sysctl，避免 `sysctl -a` 带来的慢和噪音
+# 只备份/恢复真正会动到的 sysctl
 SYSCTL_KEYS=(
   net.core.rmem_max
   net.core.wmem_max
@@ -174,7 +165,11 @@ prompt_yesno() {
     case "$ans" in
         y|Y|yes|YES) return 0 ;;
         n|N|no|NO)   return 1 ;;
-        *) warn "请输入 y 或 n"; prompt_yesno "$q" "$def" ;;
+        *)
+            warn "请输入 y 或 n"
+            prompt_yesno "$q" "$def"
+            return $?
+            ;;
     esac
 }
 
@@ -211,7 +206,7 @@ apply_profile_defaults() {
 }
 
 sanitize_name() {
-    tr -cs '[:alnum:]._-:' '_' <<<"$1" | sed 's/^_\+//; s/_\+$//'
+    tr -cs '[:alnum:]._:-' '_' <<<"$1" | sed 's/^_//; s/_$//'
 }
 
 clamp_int() {
@@ -232,25 +227,6 @@ bytes_to_iperf_unit() {
     else
         printf '%s\n' "$b"
     fi
-}
-
-human_to_bytes() {
-    local s="$1"
-    python3 - "$s" <<'PY'
-import re, sys
-s = sys.argv[1].strip().upper()
-if s == 'AUTO':
-    print(-1)
-    raise SystemExit
-m = re.fullmatch(r'(\d+)([KMGT]?)', s)
-if not m:
-    print(0)
-    raise SystemExit
-n = int(m.group(1))
-unit = m.group(2)
-scale = {'':1, 'K':1024, 'M':1024**2, 'G':1024**3, 'T':1024**4}[unit]
-print(n * scale)
-PY
 }
 
 mbps_from_bps() {
@@ -381,7 +357,7 @@ validate_numbers() {
 
 precheck_commands() {
     local c
-    for c in ip sysctl tc ping awk sed grep python3 ss nstat sort date mktemp; do
+    for c in ip sysctl tc ping awk sed grep python3 ss nstat sort date mktemp getent; do
         have_cmd "$c" || die "缺少命令：$c"
     done
     [[ -x "$IPERF3_BIN" ]] || die "找不到 iperf3（请先安装 iperf3）"
@@ -420,10 +396,17 @@ resolve_dest_ip_for_metrics() {
 
 measure_rtt_and_bdp() {
     local ping_out rtt_line rtt_avg_ms rtt_avg_s bdp_bytes
+    local -a ping_cmd
     ping_out="$LOG_DIR/ping.txt"
 
-    log "测量 RTT：ping -n -i $PING_INTERVAL -c $PING_COUNT $SERVER_IP"
-    LC_ALL=C ping -n -i "$PING_INTERVAL" -c "$PING_COUNT" "$SERVER_IP" > "$ping_out" 2>&1 || die "ping 失败，请检查连通性"
+    if [[ "$SERVER_IP" == *:* ]]; then
+        ping_cmd=(ping -6 -n -i "$PING_INTERVAL" -c "$PING_COUNT" "$SERVER_IP")
+    else
+        ping_cmd=(ping -n -i "$PING_INTERVAL" -c "$PING_COUNT" "$SERVER_IP")
+    fi
+
+    log "测量 RTT：${ping_cmd[*]}"
+    "${ping_cmd[@]}" > "$ping_out" 2>&1 || die "ping 失败，请检查连通性"
     cat "$ping_out"
 
     rtt_line="$(grep -E 'rtt min/avg/max|round-trip min/avg/max' "$ping_out" | tail -n 1 | sed 's/.*= //')"
@@ -464,12 +447,9 @@ build_window_list() {
     local -a tmp=()
     local sorted
 
-    # Linux 下 iperf3 -w 在 TCP 上会被内核近似翻倍；因此这里用 bufmax/2 约束传给 iperf3 的请求值
     req_cap=$(( bufmax_bytes / 2 ))
     (( req_cap < 256*1024 )) && req_cap=$((256*1024))
 
-    # 以“请求窗口”维度构造候选：
-    # 目标等效窗口大致围绕 BDP/2, BDP, 2*BDP，所以请求值用 BDP/4, BDP/2, BDP
     raw_bytes+=( $(( bdp_bytes / 4 )) )
     raw_bytes+=( $(( bdp_bytes / 2 )) )
     raw_bytes+=( "$bdp_bytes" )
@@ -617,13 +597,19 @@ run_iperf_once() {
     local phase="$1" cc="$2" qdisc="$3" win="$4" duration="$5"
     local run_id err_file json_file n_before n_after r1 r2 local_rdelta rc
     local parse_out bps sender_retrans mbps
+    local safe_cc safe_qdisc safe_win
     local -a cmd=()
     local -a warg=()
     local -a timeout_cmd=()
 
     RUN_INDEX=$(( RUN_INDEX + 1 ))
     run_id=$(printf '%03d' "$RUN_INDEX")
-    json_file="$LOG_DIR/${phase}_${run_id}_${cc}_${qdisc}_w${win}.json"
+
+    safe_cc="$(sanitize_name "$cc")"
+    safe_qdisc="$(sanitize_name "$qdisc")"
+    safe_win="$(sanitize_name "$win")"
+
+    json_file="$LOG_DIR/${phase}_${run_id}_${safe_cc}_${safe_qdisc}_w${safe_win}.json"
     err_file="$LOG_DIR/${phase}_${run_id}.err"
     n_before="$LOG_DIR/nstat_before_${phase}_${run_id}.txt"
     n_after="$LOG_DIR/nstat_after_${phase}_${run_id}.txt"
@@ -931,8 +917,7 @@ main() {
     done <<< "$coarse_ranked"
 
     if [[ "$STOP_EARLY" -eq 1 ]]; then
-        reached_flag="$({
-            python3 - "$TARGET_MBPS" "$coarse_ranked" <<'PY'
+        reached_flag="$(python3 - "$TARGET_MBPS" "$coarse_ranked" <<'PY'
 import sys
 threshold = float(sys.argv[1])
 ranked = sys.argv[2].splitlines()
@@ -946,11 +931,12 @@ for line in ranked:
             pass
 print(1 if best >= threshold else 0)
 PY
-        } | tr -d '[:space:]')"
+)"
+        reached_flag="$(tr -d '[:space:]' <<<"$reached_flag")"
         if [[ "$reached_flag" == "1" ]]; then
             reached=1
             log "粗筛阶段已达到目标 ${TARGET_MBPS} Mbps，精测只验证当前最佳候选。"
-            fine_candidates="$(printf '%s\n' "$coarse_ranked" | head -n 1)"
+            fine_candidates="$(sed -n '1p' <<<"$coarse_ranked")"
         else
             fine_candidates="$coarse_ranked"
         fi
