@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/25789533/README.md)
 # iperf3.sh
 
 一个面向 **iperf3 单流反向测试（`-R`）** 的自动调优脚本，适合在 **中国大陆 client / 境外 server** 这类高 RTT 场景中使用。
@@ -455,6 +454,4 @@ sudo ./iperf3.sh
 
 ---
 
-## 15. License
 
-你可以按自己的仓库需要补充许可证，例如 MIT。
