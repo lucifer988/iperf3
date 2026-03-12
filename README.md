@@ -54,7 +54,7 @@ sudo ./iperf3.sh \
 
 一个面向 **iperf3 单流反向测试（`-R`）** 的自动调优脚本，适合在 **中国大陆 client / 境外 server** 这类高 RTT 场景中使用。
 
-它的设计目标不是“把所有参数穷举一遍”，而是：
+它的设计目标不是"把所有参数穷举一遍"，而是：
 
 - 按 RTT 估算 BDP
 - 自动生成合理的 `-w` 候选
@@ -74,7 +74,7 @@ sudo ./iperf3.sh \
 iperf3 -c SERVER -R
 ```
 
-来测试“境外到大陆”的回程带宽，但真正开始调参数时，经常会遇到几个问题：
+来测试"境外到大陆"的回程带宽，但真正开始调参数时，经常会遇到几个问题：
 
 1. **调错机器**：`-R` 是 server 发、client 收，真正控制大发送流拥塞控制算法的是 server。
 2. **测试太慢**：几十组参数每组跑 30 秒，很容易一轮十几二十分钟。
@@ -201,8 +201,7 @@ sudo ./iperf3.sh
 - server 地址
 - 端口
 - 目标吞吐
-- 服务端最大带宽
-- 是否启用远端调优
+- 最大带宽
 - 最终是回滚、保留还是持久化
 
 ### 6.2 非交互，本地接收端优化
@@ -212,34 +211,30 @@ sudo ./iperf3.sh \
   --server 1.2.3.4 \
   --port 5201 \
   --target-mbps 1000 \
-  --server-max-mbps 1000 \
-  --non-interactive \
-  --final-action rollback
+  --max-mbps 1000 \
+  --rollback \
+  --yes
 ```
 
-### 6.3 非交互，同时调优远端 sender（推荐）
+### 6.3 非交互，持久化配置
 
 ```bash
 sudo ./iperf3.sh \
   --server 1.2.3.4 \
-  --server-ssh root@1.2.3.4 \
-  --remote-tune 1 \
   --target-mbps 1000 \
-  --server-max-mbps 1000 \
-  --non-interactive \
-  --final-action ask
+  --max-mbps 1000 \
+  --persist \
+  --yes
 ```
 
-### 6.4 指定远端候选算法
+### 6.4 指定 profile
 
 ```bash
 sudo ./iperf3.sh \
   --server 1.2.3.4 \
-  --server-ssh root@1.2.3.4 \
-  --remote-tune 1 \
-  --remote-cc-list "bbr cubic" \
-  --remote-qdisc-list "fq fq_codel" \
-  --non-interactive
+  --profile balanced \
+  --persist \
+  --yes
 ```
 
 ### 6.5 ping 不通时手工给 RTT
@@ -247,9 +242,9 @@ sudo ./iperf3.sh \
 ```bash
 sudo ./iperf3.sh \
   --server your-domain.com \
-  --rtt-hint-ms 85 \
-  --server-max-mbps 1000 \
-  --non-interactive
+  --target-mbps 1000 \
+  --max-mbps 1000 \
+  --yes
 ```
 
 ---
@@ -263,22 +258,21 @@ sudo ./iperf3.sh \
 | `--server HOST` | iperf3 server 地址 | 必填 |
 | `--port PORT` | iperf3 端口 | `5201` |
 | `--target-mbps N` | 目标吞吐 Mbps | `1000` |
-| `--server-max-mbps N` | 服务端可用最大带宽 Mbps，用于估算 BDP | `1000` |
+| `--max-mbps N` | 服务端可用最大带宽 Mbps，用于估算 BDP | `1000` |
 | `--ping-interval SEC` | ping 间隔 | `0.2` |
-| `--ping-count N` | ping 次数 | `10` |
-| `--rtt-hint-ms N` | ping 不通时手工指定 RTT | 空 |
+| `--ping-count N` | ping 次数 | `12` |
 
 ### 搜索策略
 
 | 参数 | 说明 | 默认值 |
 |---|---|---:|
-| `--coarse-t SEC` | 粗筛时长 | `8` |
-| `--fine-t SEC` | 复测时长 | `15` |
-| `--confirm-t SEC` | 最终确认时长 | `20` |
-| `--omit SEC` | 跳过慢启动时长 | `3` |
-| `--topk N` | 进入复测的候选数量 | `3` |
-| `--fine-repeats N` | 每个候选复测次数 | `2` |
-| `--stop-early {0|1}` | 粗筛达标后提前确认 | `1` |
+| `--coarse-seconds N` | 粗筛时长 | `8` |
+| `--fine-seconds N` | 精测时长 | `15` |
+| `--omit N` | omit 秒数 | `3` |
+| `--ping-count N` | ping 次数 | `12` |
+| `--ping-interval SEC` | ping 间隔秒数 | `0.2` |
+| `--top-n N` | 粗筛后进入精测的候选数 | `2` |
+| `--fine-repeats N` | 每个候选精测重复次数 | `2` |
 
 ### 本地接收侧参数
 
@@ -292,25 +286,15 @@ sudo ./iperf3.sh \
 | `--bind-addr ADDR` | client 侧绑定源地址 | 空 |
 | `--client-qdisc NAME` | client 侧 root qdisc（可选） | 空 |
 
-### 远端发送侧参数
-
-| 参数 | 说明 | 默认值 |
-|---|---|---:|
-| `--server-ssh USER@HOST` | 远端 SSH 登录 | 空 |
-| `--remote-tune {0|1}` | 是否启用远端调优 | `0` |
-| `--remote-iface DEV` | 远端网卡 | 自动探测 |
-| `--remote-cc-list "..."` | 远端拥塞控制候选 | `bbr cubic` |
-| `--remote-qdisc-list "..."` | 远端 qdisc 候选 | `fq fq_codel` |
-
 ### 其他参数
 
 | 参数 | 说明 | 默认值 |
 |---|---|---:|
-| `--log-root DIR` | 日志根目录 | 当前目录 |
-| `--final-action {ask|keep|persist|rollback}` | 结束后的处理动作 | `ask` |
-| `--non-interactive` | 非交互模式 | 关闭 |
-| `--4` | 强制 IPv4 | 关闭 |
-| `--6` | 强制 IPv6 | 关闭 |
+| `--log-dir DIR` | 日志目录 | 当前目录 |
+| `--rollback` | 结束后自动回滚 | - |
+| `--keep` | 结束后保留运行态 | - |
+| `--persist` | 结束后持久化 | - |
+| `--yes` | 非交互模式 | 关闭 |
 | `-h`, `--help` | 查看帮助 | - |
 
 ---
@@ -387,56 +371,27 @@ results_autotune_<server>_<timestamp>/
 
 ## 10. 推荐实践
 
-### 推荐 1：优先启用远端调优
+### 推荐 1：使用 iperf3-remote.sh 调优两端
 
-如果你能 SSH 到 server，建议使用：
+如果能 SSH 到 server，建议用 `iperf3-remote.sh`（自动调优服务端+本地）。
 
-```bash
---server-ssh root@SERVER --remote-tune 1
-```
+### 推荐 2：先用默认参数
 
-因为 `-R` 下真正发送数据的是 server，sender 端的 `cc/qdisc` 往往比 client 本地改 `cc/qdisc` 更关键。
+默认的 `--profile balanced` 已经够用。
 
-### 推荐 2：先用默认搜索参数
+### 推荐 3：把 `--max-mbps` 填成真实上限
 
-默认的：
-
-- `coarse=8s`
-- `fine=15s`
-- `confirm=20s`
-- `omit=3s`
-
-已经比传统“每组都跑 30 秒”的全量穷举快很多，通常足够日常使用。
-
-### 推荐 3：把 `server-max-mbps` 填成真实上限
-
-BDP 估算依赖：
-
-- RTT
-- 服务端可用最大带宽
-
-如果这里填得太离谱，生成的 `-w` 候选就会偏离实际。
-
-### 推荐 4：不要把 `-w` 当万能药
-
-在 Linux 上，接收缓冲自动调优本身就很重要，所以这个脚本会同时处理：
-
-- `rmem_max`
-- `tcp_rmem`
-- `tcp_moderate_rcvbuf`
-- `tcp_no_metrics_save`
-
-而不是只盯着 `-w` 一个参数。
+BDP 估算依赖服务端真实带宽，填准确才有效。
 
 ---
 
 ## 11. 已知注意事项
 
-1. 这是 **单流** 调优脚本，不是多流聚合吞吐优化器。  
-2. 这是针对 **反向测试 `-R`** 设计的，不是正向 `client -> server` 的通用调优器。  
-3. 若远端 SSH 不能免密、不能 root、缺少 `tc/sysctl/ip`，远端调优将无法使用。  
-4. 某些云厂商内核、容器环境、受限 VPS 可能不允许修改部分 sysctl / qdisc。  
-5. `persist` 会写系统配置，请先确认你理解这些参数对业务流量的影响。  
+1. 这是 **单流** 调优脚本，不是多流聚合吞吐优化器。
+2. 这是针对 **反向测试 `-R`** 设计的，不是正向 `client -> server` 的通用调优器。
+3. 若远端 SSH 不能免密、不能 root、缺少 `tc/sysctl/ip`，远端调优将无法使用。
+4. 某些云厂商内核、容器环境、受限 VPS 可能不允许修改部分 sysctl / qdisc。
+5. `persist` 会写系统配置，请先确认你理解这些参数对业务流量的影响。
 
 ---
 
@@ -447,9 +402,9 @@ BDP 估算依赖：
 ```bash
 sudo ./iperf3.sh \
   --server 1.2.3.4 \
-  --server-max-mbps 1000 \
-  --non-interactive \
-  --final-action rollback
+  --max-mbps 1000 \
+  --rollback \
+  --yes
 ```
 
 ### 找最优并暂时保留
@@ -457,11 +412,9 @@ sudo ./iperf3.sh \
 ```bash
 sudo ./iperf3.sh \
   --server 1.2.3.4 \
-  --server-ssh root@1.2.3.4 \
-  --remote-tune 1 \
-  --server-max-mbps 1000 \
-  --non-interactive \
-  --final-action keep
+  --max-mbps 1000 \
+  --keep \
+  --yes
 ```
 
 ### 确认稳定后持久化
@@ -469,11 +422,9 @@ sudo ./iperf3.sh \
 ```bash
 sudo ./iperf3.sh \
   --server 1.2.3.4 \
-  --server-ssh root@1.2.3.4 \
-  --remote-tune 1 \
-  --server-max-mbps 1000 \
-  --non-interactive \
-  --final-action persist
+  --max-mbps 1000 \
+  --persist \
+  --yes
 ```
 
 ---
