@@ -54,22 +54,35 @@ echo
 if [[ $REMOTE_TUNE -eq 1 ]]; then
   echo "[*] 步骤 1: SSH 到服务端执行调优..."
   
-  ssh "$SERVER_SSH" bash <<'REMOTE_SCRIPT'
+  ssh "$SERVER_SSH" bash <<REMOTE_SCRIPT
 set -e
+echo "[远程] 测量 RTT..."
+RTT=\$(ping -c 10 -i 0.2 $SERVER_IP 2>/dev/null | tail -1 | awk -F'/' '{print \$5}' || echo "50")
+echo "[远程] RTT: \${RTT} ms"
+
+BDP=\$(awk "BEGIN {print int($TARGET_MBPS * 1000000 / 8 * \$RTT / 1000)}")
+WMEM_MAX=\$(awk "BEGIN {print int(\$BDP * 4)}")
+[[ \$WMEM_MAX -lt 16777216 ]] && WMEM_MAX=16777216
+[[ \$WMEM_MAX -gt 134217728 ]] && WMEM_MAX=134217728
+
+echo "[远程] BDP: \$BDP bytes"
+echo "[远程] WMEM_MAX: \$WMEM_MAX bytes"
+
 echo "[远程] 备份当前参数..."
 sysctl net.core.rmem_max > /tmp/iperf3_rmem_max.bak 2>/dev/null || true
 sysctl net.core.wmem_max > /tmp/iperf3_wmem_max.bak 2>/dev/null || true
 sysctl net.ipv4.tcp_wmem > /tmp/iperf3_tcp_wmem.bak 2>/dev/null || true
+sysctl net.ipv4.tcp_congestion_control > /tmp/iperf3_cc.bak 2>/dev/null || true
 
-echo "[远程] 调大发送缓冲..."
-sysctl -w net.core.rmem_max=134217728
-sysctl -w net.core.wmem_max=134217728
-sysctl -w net.ipv4.tcp_wmem="4096 87380 134217728"
+echo "[远程] 应用调优参数..."
+sysctl -w net.core.rmem_max=\$WMEM_MAX
+sysctl -w net.core.wmem_max=\$WMEM_MAX
+sysctl -w net.ipv4.tcp_wmem="4096 87380 \$WMEM_MAX"
 sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic
 
 echo "[远程] 启动 iperf3 server..."
 pkill -9 iperf3 2>/dev/null || true
-nohup iperf3 -s -p 5201 > /tmp/iperf3-server.log 2>&1 &
+nohup iperf3 -s -p $SERVER_PORT > /tmp/iperf3-server.log 2>&1 &
 sleep 2
 echo "[远程] iperf3 server 已启动"
 REMOTE_SCRIPT
@@ -107,6 +120,10 @@ fi
 if [[ -f /tmp/iperf3_tcp_wmem.bak ]]; then
   OLD_VAL=$(cat /tmp/iperf3_tcp_wmem.bak | cut -d= -f2- | xargs)
   sysctl -w net.ipv4.tcp_wmem="$OLD_VAL" 2>/dev/null || true
+fi
+if [[ -f /tmp/iperf3_cc.bak ]]; then
+  OLD_VAL=$(cat /tmp/iperf3_cc.bak | awk '{print $NF}')
+  sysctl -w net.ipv4.tcp_congestion_control="$OLD_VAL" 2>/dev/null || true
 fi
 
 rm -f /tmp/iperf3_*.bak
