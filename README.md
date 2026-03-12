@@ -1,4 +1,56 @@
-# iperf3.sh
+# iperf3 自动调优脚本
+
+包含两个脚本：
+- `iperf3.sh` - 本地调优脚本
+- `iperf3-remote.sh` - 远程调优包装脚本（推荐）
+
+---
+
+## 快速开始
+
+### 方式1：使用 iperf3-remote.sh（推荐，自动调优两端）
+
+```bash
+# 下载脚本
+curl -fsSL https://raw.githubusercontent.com/lucifer988/iperf3/main/iperf3-remote.sh -o ~/iperf3-remote.sh
+curl -fsSL https://raw.githubusercontent.com/lucifer988/iperf3/main/iperf3.sh -o ~/iperf3.sh
+chmod +x ~/iperf3-remote.sh ~/iperf3.sh
+
+# 运行（会自动调优服务端并测速）
+sudo ~/iperf3-remote.sh \
+  --server-ssh root@1.2.3.4 \
+  --server 1.2.3.4 \
+  --target-mbps 600
+
+# 免密码运行
+sshpass -p '密码' sudo -E ~/iperf3-remote.sh \
+  --server-ssh root@1.2.3.4 \
+  --server 1.2.3.4 \
+  --target-mbps 600
+```
+
+**iperf3-remote.sh 会自动：**
+1. SSH 到服务端，根据 RTT/BDP 动态调优发送缓冲
+2. 启动 iperf3 server
+3. 调用 iperf3.sh 本地测速
+4. 测完后清理服务端
+
+### 方式2：只用 iperf3.sh（仅本地调优）
+
+```bash
+sudo ./iperf3.sh \
+  --server 1.2.3.4 \
+  --port 5201 \
+  --target-mbps 1000 \
+  --max-mbps 1000 \
+  --profile balanced \
+  --persist \
+  --yes
+```
+
+---
+
+# iperf3.sh 详细文档
 
 一个面向 **iperf3 单流反向测试（`-R`）** 的自动调优脚本，适合在 **中国大陆 client / 境外 server** 这类高 RTT 场景中使用。
 
