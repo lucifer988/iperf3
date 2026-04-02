@@ -378,7 +378,7 @@ init_logs() {
     mkdir -p "$LOG_DIR"
     SUMMARY_CSV="$LOG_DIR/summary.csv"
     BEST_HELPER="$LOG_DIR/run_best.sh"
-    printf 'phase,run_id,cc,qdisc,window,mbps,sender_retrans,local_retrans_delta,rc,json_file,err_file\n' > "$SUMMARY_CSV"
+    printf 'phase,run_id,cc,qdisc,window,mbps,sender_retrans,local_retrans_delta,score,rc,json_file,err_file\n' > "$SUMMARY_CSV"
 }
 
 resolve_iface() {
@@ -596,7 +596,7 @@ PY
 run_iperf_once() {
     local phase="$1" cc="$2" qdisc="$3" win="$4" duration="$5"
     local run_id err_file json_file n_before n_after r1 r2 local_rdelta rc
-    local parse_out bps sender_retrans mbps
+    local parse_out bps sender_retrans mbps score
     local safe_cc safe_qdisc safe_win
     local -a cmd=()
     local -a warg=()
@@ -615,7 +615,7 @@ run_iperf_once() {
     n_after="$LOG_DIR/nstat_after_${phase}_${run_id}.txt"
 
     if ! apply_local_sender_profile "$cc" "$qdisc" "$IFACE"; then
-        printf '%s,%s,%s,%s,%s,0,-1,0,1,%s,%s\n' \
+        printf '%s,%s,%s,%s,%s,0,-1,0,-999999,1,%s,%s\n' \
           "$phase" "$run_id" "$cc" "$qdisc" "$win" "/dev/null" "$err_file" >> "$SUMMARY_CSV"
         return 1
     fi
@@ -651,7 +651,7 @@ run_iperf_once() {
 
     if [[ ! -s "$json_file" || "$rc" -ne 0 ]]; then
         warn "[$phase/$run_id] iperf3 返回 rc=$rc，详情见 $err_file"
-        printf '%s,%s,%s,%s,%s,0,-1,%s,%s,%s,%s\n' \
+        printf '%s,%s,%s,%s,%s,0,-1,%s,-999999,%s,%s,%s\n' \
           "$phase" "$run_id" "$cc" "$qdisc" "$win" "$local_rdelta" "$rc" "$json_file" "$err_file" >> "$SUMMARY_CSV"
         return 1
     fi
@@ -662,11 +662,46 @@ run_iperf_once() {
     [[ -n "$bps" ]] || bps=0
     [[ -n "$sender_retrans" ]] || sender_retrans=-1
     mbps="$(mbps_from_bps "$bps")"
+    score="$(compute_run_score "$mbps" "$sender_retrans" "$local_rdelta")"
 
-    log "[$phase/$run_id] => ${mbps} Mbps | sender_retrans=${sender_retrans} | local TcpRetransSegs Δ=${local_rdelta} | rc=$rc"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-      "$phase" "$run_id" "$cc" "$qdisc" "$win" "$mbps" "$sender_retrans" "$local_rdelta" "$rc" "$json_file" "$err_file" >> "$SUMMARY_CSV"
+    log "[$phase/$run_id] => ${mbps} Mbps | sender_retrans=${sender_retrans} | local TcpRetransSegs Δ=${local_rdelta} | score=${score} | rc=$rc"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+      "$phase" "$run_id" "$cc" "$qdisc" "$win" "$mbps" "$sender_retrans" "$local_rdelta" "$score" "$rc" "$json_file" "$err_file" >> "$SUMMARY_CSV"
     return 0
+}
+
+compute_run_score() {
+    local mbps="$1" sender_retrans="$2" local_retrans="$3"
+    python3 - "$mbps" "$sender_retrans" "$local_retrans" <<'PY'
+import sys
+mbps = float(sys.argv[1])
+sender = int(float(sys.argv[2]))
+local = int(float(sys.argv[3]))
+penalty = 0.0
+if sender >= 0:
+    penalty += sender * 25.0
+if local >= 0:
+    penalty += local * 5.0
+score = mbps - penalty
+print(f"{score:.2f}")
+PY
+}
+
+write_final_summary_json() {
+    python3 - "$SUMMARY_CSV" "$LOG_DIR/final-summary.json" \
+      "${BEST_META[phase]:-}" "${BEST_META[cc]:-}" "${BEST_META[qdisc]:-}" "${BEST_META[win]:-}" \
+      "${BEST_META[mbps]:-0}" "${BEST_META[sender_retrans]:--1}" "${BEST_META[local_retrans]:--1}" \
+      "${BEST_META[score]:-0}" "$BEST_HELPER" <<'PY'
+import csv, json, sys
+csv_path, out_path, phase, cc, qdisc, win, mbps, sender, local, score, best_helper = sys.argv[1:]
+runs = []
+with open(csv_path, newline="", encoding="utf-8", errors="ignore") as f:
+    for row in csv.DictReader(f):
+        runs.append(row)
+obj = {"best": {"phase": phase, "cc": cc, "qdisc": qdisc, "window": win, "mbps": float(mbps), "sender_retrans": int(float(sender)), "local_retrans_delta": int(float(local)), "score": float(score), "helper": best_helper}, "runs": runs}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(obj, f, ensure_ascii=False, indent=2)
+PY
 }
 
 rank_candidates() {
@@ -686,12 +721,13 @@ with open(csv_path, newline='', encoding='utf-8', errors='ignore') as f:
             mbps = float(row['mbps'])
             sender_retrans = int(row['sender_retrans'])
             local_retrans = int(row['local_retrans_delta'])
+            score = float(row.get('score', mbps))
         except Exception:
             continue
         if rc != 0 or mbps <= 0:
             continue
         key = (row['cc'], row['qdisc'], row['window'])
-        rows.append((key, mbps, sender_retrans, local_retrans))
+        rows.append((key, mbps, sender_retrans, local_retrans, score))
 
 groups = defaultdict(list)
 for rec in rows:
@@ -702,7 +738,9 @@ for key, items in groups.items():
     mbps_vals = [x[0] for x in items]
     sender_vals = [10**12 if x[1] < 0 else x[1] for x in items]
     local_vals = [x[2] for x in items]
+    score_vals = [x[3] for x in items]
     ranked.append((
+        statistics.median(score_vals),
         statistics.median(mbps_vals),
         statistics.median(sender_vals),
         statistics.median(local_vals),
@@ -710,11 +748,11 @@ for key, items in groups.items():
         key,
     ))
 
-ranked.sort(key=lambda x: (-x[0], x[1], x[2], x[4]))
-for med_mbps, med_sender, med_local, n, key in ranked[:top_n]:
+ranked.sort(key=lambda x: (-x[0], x[2] if x[2] >= 0 else 10**12, x[3], -x[1], x[5]))
+for med_score, med_mbps, med_sender, med_local, n, key in ranked[:top_n]:
     cc, qdisc, win = key
     sender_out = -1 if med_sender >= 10**12 else int(med_sender)
-    print(f"{cc}|{qdisc}|{win}|{med_mbps:.2f}|{sender_out}|{int(med_local)}|{n}")
+    print(f"{cc}|{qdisc}|{win}|{med_mbps:.2f}|{sender_out}|{int(med_local)}|{n}|{med_score:.2f}")
 PY
 }
 
@@ -807,34 +845,37 @@ with open(sys.argv[1], newline='', encoding='utf-8', errors='ignore') as f:
             mbps = float(row['mbps'])
             sender_retrans = int(row['sender_retrans'])
             local_retrans = int(row['local_retrans_delta'])
+            score = float(row.get('score', mbps))
         except Exception:
             continue
         if rc != 0 or mbps <= 0:
             continue
         key = (row['phase'], row['cc'], row['qdisc'], row['window'])
-        rows.append((key, mbps, sender_retrans, local_retrans))
+        rows.append((key, mbps, sender_retrans, local_retrans, score))
 
 groups = defaultdict(list)
-for key, mbps, sender, local in rows:
-    groups[key].append((mbps, sender, local))
+for key, mbps, sender, local, score in rows:
+    groups[key].append((mbps, sender, local, score))
 
 ranked = []
 for (phase, cc, qdisc, window), items in groups.items():
     mbps_vals = [x[0] for x in items]
     sender_vals = [10**12 if x[1] < 0 else x[1] for x in items]
     local_vals = [x[2] for x in items]
+    score_vals = [x[3] for x in items]
     ranked.append((
+        statistics.median(score_vals),
         statistics.median(mbps_vals),
         statistics.median(sender_vals),
         statistics.median(local_vals),
         len(items),
         phase, cc, qdisc, window,
     ))
-ranked.sort(key=lambda x: (-x[0], x[1], x[2], x[4], x[5], x[6], x[7]))
+ranked.sort(key=lambda x: (-x[0], x[2] if x[2] >= 0 else 10**12, x[3], -x[1], x[5], x[6], x[7]))
 for i, row in enumerate(ranked[:5], 1):
-    med_mbps, med_sender, med_local, n, phase, cc, qdisc, window = row
+    med_score, med_mbps, med_sender, med_local, n, phase, cc, qdisc, window = row
     sender_out = -1 if med_sender >= 10**12 else int(med_sender)
-    print(f"{i}. {med_mbps:.2f} Mbps | sender_retrans={sender_out} | localΔ={int(med_local)} | runs={n} | phase={phase} | cc={cc} qdisc={qdisc} w={window}")
+    print(f"{i}. score={med_score:.2f} | {med_mbps:.2f} Mbps | sender_retrans={sender_out} | localΔ={int(med_local)} | runs={n} | phase={phase} | cc={cc} qdisc={qdisc} w={window}")
 PY
 }
 
@@ -849,7 +890,7 @@ select_best_overall() {
     fi
     [[ -n "$ranked" ]] || return 1
 
-    IFS='|' read -r BEST_META[cc] BEST_META[qdisc] BEST_META[win] BEST_META[mbps] BEST_META[sender_retrans] BEST_META[local_retrans] BEST_META[runs] <<< "$ranked"
+    IFS='|' read -r BEST_META[cc] BEST_META[qdisc] BEST_META[win] BEST_META[mbps] BEST_META[sender_retrans] BEST_META[local_retrans] BEST_META[runs] BEST_META[score] <<< "$ranked"
     BEST_META[phase]="$phase_for_best"
     return 0
 }
@@ -909,7 +950,7 @@ main() {
     [[ -n "$coarse_ranked" ]] || die "所有粗筛测试都失败了，请检查 server 端、端口、防火墙、链路质量。"
 
     echo
-    log "粗筛 Top ${TOP_N}："
+    log "粗筛 Top ${TOP_N}（优先综合评分，其次低重传、再看高吞吐）："
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         IFS='|' read -r cc qdisc win _ <<< "$line"
@@ -963,13 +1004,16 @@ PY
     echo "最佳阶段：${BEST_META[phase]}"
     echo "最佳中位数吞吐：${BEST_META[mbps]} Mbps"
     echo "最佳参数：cc=${BEST_META[cc]}, qdisc=${BEST_META[qdisc]}, -w=${BEST_META[win]}"
+    echo "综合评分：${BEST_META[score]}（越高越好；已惩罚重传）"
     echo "sender_retrans（中位数）：${BEST_META[sender_retrans]}"
     echo "本地 TcpRetransSegs Δ（中位数）：${BEST_META[local_retrans]}"
     echo "汇总表：${SUMMARY_CSV}"
     echo "推荐运行脚本：${BEST_HELPER}"
+    write_final_summary_json
+    echo "结构化汇总：${LOG_DIR}/final-summary.json"
     echo "======================================================"
     echo
-    echo "[*] Top 5 聚合结果（按 Mbps 降序、重传升序）："
+    echo "[*] Top 5 聚合结果（按综合评分降序，其次低重传、再看高吞吐）："
     print_aggregated_top
     echo
 
