@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SERVER_SSH=""
+SERVER_SSH_PASS="${IPERF3_SERVER_SSH_PASS:-}"
+SERVER_SSH_PORT="${IPERF3_SERVER_SSH_PORT:-22}"
 SERVER_IP=""
 SERVER_PORT=5201
 TARGET_MBPS=1000
@@ -35,6 +37,8 @@ cat <<'EOF'
   --server IP               服务端 IP（用于 iperf3 连接）
 
 可选参数:
+  --server-ssh-pass PASS    可选；SSH 密码（需本机已安装 sshpass）
+  --server-ssh-port PORT    可选；SSH 端口，默认 22
   --port PORT               iperf3 端口，默认 5201
   --target-mbps N           目标速率，默认 1000
   --client-ip IP            可选；client 公网 IP（服务端能直 ping 时填写）
@@ -58,6 +62,7 @@ cat <<'EOF'
 示例:
   sudo ./iperf3-remote.sh \
     --server-ssh root@1.2.3.4 \
+    --server-ssh-pass '你的SSH密码' \
     --server 1.2.3.4 \
     --remote-profile auto-all \
     --target-mbps 600
@@ -67,6 +72,8 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --server-ssh) SERVER_SSH="$2"; shift 2 ;;
+    --server-ssh-pass) SERVER_SSH_PASS="$2"; shift 2 ;;
+    --server-ssh-port) SERVER_SSH_PORT="$2"; shift 2 ;;
     --server) SERVER_IP="$2"; shift 2 ;;
     --port) SERVER_PORT="$2"; shift 2 ;;
     --target-mbps) TARGET_MBPS="$2"; shift 2 ;;
@@ -95,12 +102,24 @@ done
 [[ -z "$SERVER_IP" ]] && { echo "错误: 缺少 --server"; usage; exit 1; }
 [[ -x "$LOCAL_SCRIPT" ]] || { echo "错误: 本地脚本不存在或不可执行: $LOCAL_SCRIPT" >&2; exit 1; }
 [[ "$REMOTE_PROFILE" =~ ^(auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel)$ ]] || { echo "错误: --remote-profile 非法" >&2; exit 1; }
+[[ "$SERVER_SSH_PORT" =~ ^[0-9]+$ ]] || { echo "错误: --server-ssh-port 必须是整数" >&2; exit 1; }
 [[ -z "$REMOTE_RTT_MS" || "$REMOTE_RTT_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "错误: --remote-rtt-ms 必须是数字" >&2; exit 1; }
+if [[ -n "$SERVER_SSH_PASS" ]] && ! command -v sshpass >/dev/null 2>&1; then
+  echo "错误: 传了 --server-ssh-pass，但系统里没有 sshpass。请先安装：apt-get update && apt-get install -y sshpass" >&2
+  exit 1
+fi
+
+SSH_CMD=(ssh -p "$SERVER_SSH_PORT" -o StrictHostKeyChecking=accept-new)
+if [[ -n "$SERVER_SSH_PASS" ]]; then
+  SSH_CMD=(sshpass -p "$SERVER_SSH_PASS" "${SSH_CMD[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1)
+fi
 
 echo "[*] 远程调优目标: $SERVER_SSH"
+echo "[*] SSH 端口: $SERVER_SSH_PORT"
 echo "[*] 服务端 IP: $SERVER_IP"
 echo "[*] 目标速率: ${TARGET_MBPS} Mbps"
 echo "[*] 远端 profile: ${REMOTE_PROFILE}"
+[[ -n "$SERVER_SSH_PASS" ]] && echo "[*] SSH 认证: 密码模式"
 [[ -n "$CLIENT_IP" ]] && echo "[*] Client IP: $CLIENT_IP"
 [[ -n "$REMOTE_RTT_MS" ]] && echo "[*] 手动 RTT: ${REMOTE_RTT_MS} ms"
 echo
@@ -114,7 +133,7 @@ printf "profile	best_mbps	local_cc	local_qdisc	local_win	log	report
 " > "$SUMMARY_TSV"
 
 remote_bootstrap() {
-  ssh "$SERVER_SSH" "CLIENT_IP='$CLIENT_IP' REMOTE_RTT_MS='$REMOTE_RTT_MS' SERVER_PORT='$SERVER_PORT' TARGET_MBPS='$TARGET_MBPS' REMOTE_PERSIST='$REMOTE_PERSIST' REMOTE_PROFILE='$REMOTE_PROFILE' bash -s" <<'REMOTE_SCRIPT'
+  "${SSH_CMD[@]}" "$SERVER_SSH" "CLIENT_IP='$CLIENT_IP' REMOTE_RTT_MS='$REMOTE_RTT_MS' SERVER_PORT='$SERVER_PORT' TARGET_MBPS='$TARGET_MBPS' REMOTE_PERSIST='$REMOTE_PERSIST' REMOTE_PROFILE='$REMOTE_PROFILE' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 PID_FILE=/tmp/iperf3-server.pid
 LOG_FILE=/tmp/iperf3-server.log
@@ -236,7 +255,7 @@ REMOTE_SCRIPT
 
 remote_apply_profile() {
   local profile="$1"
-  ssh "$SERVER_SSH" "REMOTE_PROFILE='$profile' bash -s" <<'REMOTE_APPLY'
+  "${SSH_CMD[@]}" "$SERVER_SSH" "REMOTE_PROFILE='$profile' bash -s" <<'REMOTE_APPLY'
 set -euo pipefail
 apply_profile() {
   local profile="$1" qdisc cc iface
@@ -435,7 +454,7 @@ fi
 echo
 if [[ $REMOTE_TUNE -eq 1 && $REMOTE_KEEP -eq 0 ]]; then
   echo "[*] 步骤 3: 清理服务端..."
-  ssh "$SERVER_SSH" bash -s <<'CLEANUP'
+  "${SSH_CMD[@]}" "$SERVER_SSH" bash -s <<'CLEANUP'
 set -euo pipefail
 PID_FILE=/tmp/iperf3-server.pid
 restore_key() {

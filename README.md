@@ -5,12 +5,14 @@
 - 尽量把 `iperf3 -R` 单流速度拉高
 - 同时把重传压低
 - 优先适配“本地没有公网 IP，但本地能 SSH 到服务端”的场景
+- 支持密码 SSH，不要求免密登录
 
-仓库里有 3 个脚本，但日常只需要记住 1 个入口：
+仓库里有 4 个关键文件，但日常只需要记住 2 个：
 
 - `iperf3-easy.sh`：主入口，推荐直接用
 - `iperf3-remote.sh`：双端联调包装层
 - `iperf3.sh`：本地调优底层脚本
+- `iperf3-onekey-password.example.sh`：密码 SSH 的一键填写模板
 
 ## 适用场景
 
@@ -19,31 +21,69 @@
 - 你想根据目标带宽自动扫参数，而不是手工猜 `-w`
 - 你本地没有公网 IP，但可以 `ssh` 到服务端
 
-## 一条命令先跑起来
+## 最符合你这种场景的用法
+
+如果你所有服务器都是“SSH 密码登录”，推荐直接用模板文件。
+
+### 1. 先装 `sshpass`
+
+```bash
+apt-get update
+apt-get install -y sshpass
+```
+
+### 2. 复制一键模板并填写
 
 ```bash
 git clone https://github.com/lucifer988/iperf3.git
 cd iperf3
-chmod +x iperf3-easy.sh iperf3.sh iperf3-remote.sh
-sudo ./iperf3-easy.sh \
-  --server 1.2.3.4 \
-  --server-ssh root@1.2.3.4 \
-  --target-mbps 1000 \
-  --yes
+cp iperf3-onekey-password.example.sh iperf3-onekey-password.sh
+chmod +x iperf3-easy.sh iperf3.sh iperf3-remote.sh iperf3-onekey-password.sh
 ```
 
-这就是推荐主路径。
+编辑 `iperf3-onekey-password.sh`，把这些值换成你自己的：
+
+```bash
+SERVER_IP="205.198.92.203"
+SSH_HOST="205.198.92.203"
+SSH_USER="root"
+SSH_PASS="你的SSH密码"
+SSH_PORT="22"
+TARGET_MBPS="1000"
+REMOTE_RTT_MS="180"
+```
+
+### 3. 直接运行
+
+```bash
+./iperf3-onekey-password.sh
+```
+
+这就是最省事的“一键脚本填信息后直接跑”路径。
+
+## 也可以不用模板，直接命令行跑
+
+```bash
+sudo ./iperf3-easy.sh \
+  --server 205.198.92.203 \
+  --server-ssh root@205.198.92.203 \
+  --server-ssh-pass '你的SSH密码' \
+  --target-mbps 1000 \
+  --remote-rtt-ms 180 \
+  --yes
+```
 
 它的含义是：
 
 - 本地通过 SSH 登录服务端
+- SSH 可以走密码认证，不要求免密
 - 服务端自动切换发送侧 profile
 - 本地自动搜索 `cc/qdisc/window`
 - 最终按“速度高、重传低”的综合分数选最优组合
 
 ## 没有公网 IP 也能用
 
-现在双端模式默认不再要求 `--client-ip`。
+现在双端模式默认不再要求 `--client-ip`，也不要求 SSH 免密。
 
 如果你满足下面这个条件，就可以直接用上面的主命令：
 
@@ -58,6 +98,7 @@ sudo ./iperf3-easy.sh \
 sudo ./iperf3-easy.sh \
   --server 1.2.3.4 \
   --server-ssh root@1.2.3.4 \
+  --server-ssh-pass '你的SSH密码' \
   --target-mbps 1000 \
   --remote-rtt-ms 180 \
   --yes
@@ -69,6 +110,7 @@ sudo ./iperf3-easy.sh \
 sudo ./iperf3-easy.sh \
   --server 1.2.3.4 \
   --server-ssh root@1.2.3.4 \
+  --server-ssh-pass '你的SSH密码' \
   --client-ip 5.6.7.8 \
   --target-mbps 1000 \
   --yes
@@ -123,6 +165,8 @@ sudo ./iperf3-easy.sh \
 
 - `--server IP/HOST`
 - `--server-ssh USER@HOST`
+- `--server-ssh-pass PASS`
+- `--server-ssh-port PORT`
 - `--target-mbps N`
 - `--remote-rtt-ms N`
 - `--client-ip IP`
@@ -145,11 +189,13 @@ sudo ./iperf3-easy.sh \
 
 - 本地和服务端都安装了 `iperf3`
 - 双端模式下，本地能 `ssh` 到服务端
+- 如果你走密码 SSH，本机需要 `sshpass`
 - 需要 `sudo`，因为脚本会调 `sysctl` / `tc`
 
 ## 注意事项
 
 - `-R` 模式下真正发数据的是服务端，所以远端 profile 往往比本地 sender 参数更关键。
+- `--server-ssh-pass` 会出现在 shell 历史里；长期用建议改成模板文件或环境变量。
 - `--persist` 和 `--remote-persist` 会写系统配置，生产机使用前先确认。
 - 链路波动大时，建议适当增加 `--fine-seconds` 再复测。
 - `run_best.sh` 适合复跑最佳参数，不等于永久系统最优，换线路后最好重新测。

@@ -7,6 +7,8 @@ REMOTE_SCRIPT="$SCRIPT_DIR/iperf3-remote.sh"
 
 SERVER="${IPERF3_SERVER:-}"
 SERVER_SSH="${IPERF3_SERVER_SSH:-}"
+SERVER_SSH_PASS="${IPERF3_SERVER_SSH_PASS:-}"
+SERVER_SSH_PORT="${IPERF3_SERVER_SSH_PORT:-22}"
 CLIENT_IP="${IPERF3_CLIENT_IP:-}"
 REMOTE_RTT_MS="${IPERF3_REMOTE_RTT_MS:-}"
 TARGET_MBPS="${IPERF3_TARGET_MBPS:-1000}"
@@ -44,6 +46,8 @@ cat <<'USAGE'
 参数：
   --server IP/HOST           iperf3 server 地址
   --server-ssh USER@HOST     远端 SSH（提供后自动走双端联调）
+  --server-ssh-pass PASS     可选；SSH 密码（需本机已安装 sshpass）
+  --server-ssh-port PORT     可选；SSH 端口，默认 22
   --client-ip IP             可选；你的本地公网 IP（服务端能直 ping 时再填）
   --remote-rtt-ms N          可选；没有公网 IP 时手动指定 RTT 估值
   --target-mbps N            目标单流速率，默认 1000
@@ -65,6 +69,8 @@ cat <<'USAGE'
 也支持环境变量：
   IPERF3_SERVER
   IPERF3_SERVER_SSH
+  IPERF3_SERVER_SSH_PASS
+  IPERF3_SERVER_SSH_PORT
   IPERF3_CLIENT_IP
   IPERF3_REMOTE_RTT_MS
   IPERF3_TARGET_MBPS
@@ -83,6 +89,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --server) SERVER="$2"; shift 2 ;;
     --server-ssh) SERVER_SSH="$2"; shift 2 ;;
+    --server-ssh-pass) SERVER_SSH_PASS="$2"; shift 2 ;;
+    --server-ssh-port) SERVER_SSH_PORT="$2"; shift 2 ;;
     --client-ip) CLIENT_IP="$2"; shift 2 ;;
     --remote-rtt-ms) REMOTE_RTT_MS="$2"; shift 2 ;;
     --target-mbps) TARGET_MBPS="$2"; shift 2 ;;
@@ -130,6 +138,8 @@ run_local() {
 run_remote() {
   local -a cmd
   cmd=("$REMOTE_SCRIPT" --server-ssh "$SERVER_SSH" --server "$SERVER" --port "$PORT" --target-mbps "$TARGET_MBPS" --remote-profile "$REMOTE_PROFILE" --profile "$PROFILE")
+  [[ -n "$SERVER_SSH_PASS" ]] && cmd+=(--server-ssh-pass "$SERVER_SSH_PASS")
+  [[ -n "$SERVER_SSH_PORT" ]] && cmd+=(--server-ssh-port "$SERVER_SSH_PORT")
   [[ -n "$CLIENT_IP" ]] && cmd+=(--client-ip "$CLIENT_IP")
   [[ -n "$REMOTE_RTT_MS" ]] && cmd+=(--remote-rtt-ms "$REMOTE_RTT_MS")
   [[ -n "$COARSE_SECONDS" ]] && cmd+=(--coarse-seconds "$COARSE_SECONDS")
