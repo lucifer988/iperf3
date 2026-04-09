@@ -1,189 +1,131 @@
 # iperf3 自动调优脚本
 
-包含三个脚本：
-- `iperf3-easy.sh`：一键入口，优先推荐
-- `iperf3.sh`：本地 client 侧自动调优与测速
-- `iperf3-remote.sh`：远端 server + 本地 client 双端联调包装脚本
+目标很直接：
 
-适合场景：
-- `iperf3 -R` 反向单流测试
-- 海外 server → 大陆 client
-- 高 RTT、高 BDP 场景
-- 想要“一条命令自动调优、自动测速、自动汇总”
+- 尽量把 `iperf3 -R` 单流速度拉高
+- 同时把重传压低
+- 优先适配“本地没有公网 IP，但本地能 SSH 到服务端”的场景
 
----
+仓库里有 3 个脚本，但日常只需要记住 1 个入口：
 
-## 一键入口（最省事）
+- `iperf3-easy.sh`：主入口，推荐直接用
+- `iperf3-remote.sh`：双端联调包装层
+- `iperf3.sh`：本地调优底层脚本
 
-### 双端自动联调（推荐）
+## 适用场景
+
+- 海外 server -> 大陆 client
+- 高 RTT / 高 BDP 链路
+- 你想根据目标带宽自动扫参数，而不是手工猜 `-w`
+- 你本地没有公网 IP，但可以 `ssh` 到服务端
+
+## 一条命令先跑起来
 
 ```bash
-cd /root/.openclaw/workspace-lite/iperf3-work
+git clone https://github.com/lucifer988/iperf3.git
+cd iperf3
 chmod +x iperf3-easy.sh iperf3.sh iperf3-remote.sh
-sudo ./iperf3-easy.sh   --server 你的服务端IP   --server-ssh root@你的服务端IP   --client-ip 你的本机公网IP   --target-mbps 1000   --yes
+sudo ./iperf3-easy.sh \
+  --server 1.2.3.4 \
+  --server-ssh root@1.2.3.4 \
+  --target-mbps 1000 \
+  --yes
 ```
 
-### 仅本地调优
+这就是推荐主路径。
+
+它的含义是：
+
+- 本地通过 SSH 登录服务端
+- 服务端自动切换发送侧 profile
+- 本地自动搜索 `cc/qdisc/window`
+- 最终按“速度高、重传低”的综合分数选最优组合
+
+## 没有公网 IP 也能用
+
+现在双端模式默认不再要求 `--client-ip`。
+
+如果你满足下面这个条件，就可以直接用上面的主命令：
+
+- 本地能 SSH 到服务端
+- 服务端不需要主动回连你的本地
+
+### 可选增强
+
+如果你知道链路 RTT，可以手动给一个估值，让远端初始参数更贴近实际：
 
 ```bash
-cd /root/.openclaw/workspace-lite/iperf3-work
-sudo ./iperf3-easy.sh   --server 你的服务端IP   --target-mbps 1000   --yes
+sudo ./iperf3-easy.sh \
+  --server 1.2.3.4 \
+  --server-ssh root@1.2.3.4 \
+  --target-mbps 1000 \
+  --remote-rtt-ms 180 \
+  --yes
 ```
 
-`iperf3-easy.sh` 的逻辑很简单：
-- 提供了 `--server-ssh`：自动走双端联调
-- 没提供 `--server-ssh`：自动走本地调优
-
----
-
-## 现在已经能做什么
-
-### `iperf3-easy.sh`
-- 给出更少参数的一键入口
-- 自动在“本地模式 / 双端模式”之间切换
-- 支持常见参数透传：
-  - `--server`
-  - `--server-ssh`
-  - `--client-ip`
-  - `--target-mbps`
-  - `--port`
-  - `--profile`
-  - `--remote-profile`
-  - `--rollback | --keep | --persist`
-  - `--yes`
-
-### `iperf3.sh`
-- 自动测 RTT、估算 BDP
-- 自动生成 `-w` 候选
-- 两阶段搜索：粗筛 + 精测
-- 自动调优本地接收侧 sysctl
-- 可选扫描本地 sender 因子（`cc/qdisc`）
-- 记录每轮结果到：
-  - `summary.csv`
-  - 单轮 JSON / stderr 日志
-- 输出最终结构化汇总：
-  - `final-summary.json`
-- 生成推荐复跑脚本：
-  - `run_best.sh`
-- 选择最优解时不只看吞吐，还会参考重传：
-  - `score = Mbps - sender_retrans 惩罚 - 本地 retrans 惩罚`
-
-### `iperf3-remote.sh`
-- 远程 SSH 到 server 自动调优发送侧
-- 自动启动 / 清理远端 iperf3 server
-- 自动轮询远端 profile：
-  - `bbr-fq`
-  - `cubic-fq`
-  - `cubic-fq_codel`
-  - `auto`
-  - `auto-all`
-- 调用本地 `iperf3.sh` 完成本地搜索
-- 自动汇总输出：
-  - `summary.tsv`
-  - `summary.json`
-- 支持透传本地参数：
-  - `--profile`
-  - `--coarse-seconds`
-  - `--fine-seconds`
-  - `--omit`
-  - `--bind`
-  - `--skip-rx-copy`
-
----
-
-## 常见用法
-
-### 1）一键双端联调
+如果你本地真的有可达公网 IP，也可以补 `--client-ip`，让服务端直接测 RTT：
 
 ```bash
-sudo ./iperf3-easy.sh   --server 1.2.3.4   --server-ssh root@1.2.3.4   --client-ip 5.6.7.8   --target-mbps 1000   --yes
+sudo ./iperf3-easy.sh \
+  --server 1.2.3.4 \
+  --server-ssh root@1.2.3.4 \
+  --client-ip 5.6.7.8 \
+  --target-mbps 1000 \
+  --yes
 ```
 
-### 2）一键本地调优
+## 只做本地调优
+
+如果你暂时不想 SSH 控远端：
 
 ```bash
-sudo ./iperf3-easy.sh   --server 1.2.3.4   --target-mbps 1000   --yes
+sudo ./iperf3-easy.sh \
+  --server 1.2.3.4 \
+  --local-only \
+  --target-mbps 1000 \
+  --yes
 ```
 
-### 3）只调用底层本地脚本
+或者干脆不传 `--server-ssh`，也会自动落到本地模式。
 
-```bash
-sudo ./iperf3.sh   --server 1.2.3.4   --port 5201   --target-mbps 1000   --max-mbps 1000   --profile balanced   --rollback   --yes
-```
+## 脚本会做什么
 
-### 4）只调用底层双端脚本
+`iperf3-easy.sh` 会根据你有没有提供 `--server-ssh` 自动切模式：
 
-```bash
-sudo ./iperf3-remote.sh   --server-ssh root@1.2.3.4   --server 1.2.3.4   --client-ip 5.6.7.8   --target-mbps 1000   --remote-profile auto-all   --profile balanced   --yes
-```
+- 有 `--server-ssh`：走双端联调
+- 没有 `--server-ssh`：只做本地调优
 
----
+双端联调时会做这些事：
 
-## 输出文件
+1. 远端准备 iperf3 server，并切换发送侧 profile
+2. 本地自动跑粗筛 + 精测
+3. 对 `bbr-fq` / `cubic-fq` / `cubic-fq_codel` 做对比
+4. 按吞吐和重传综合选出最佳结果
 
-### 本地结果目录
-`iperf3.sh` 跑完后会生成：
+## 输出结果
+
+本地调优结果目录里主要看：
+
 - `summary.csv`
-- 单轮 `*.json`
-- 单轮 `*.err`
 - `final-summary.json`
 - `run_best.sh`
 
-### 远端汇总目录
-`iperf3-remote.sh` 跑完后会生成：
+双端联调额外会产出：
+
 - `summary.tsv`
 - `summary.json`
 
----
-
-## 结果怎么看
-
-### `summary.csv`
-字段：
-- `phase`
-- `run_id`
-- `cc`
-- `qdisc`
-- `window`
-- `mbps`
-- `sender_retrans`
-- `local_retrans_delta`
-- `score`
-- `rc`
-- `json_file`
-- `err_file`
-
-说明：
-- `mbps`：该轮吞吐
-- `sender_retrans`：服务端发送重传
-- `local_retrans_delta`：本地侧 `TcpRetransSegs` 增量
-- `score`：综合评分，越高越好
-
-### `final-summary.json`
-会包含：
-- 最佳 phase
-- 最佳 `cc/qdisc/window`
-- 最佳中位数吞吐
-- 中位数 sender 重传
-- 中位数本地重传增量
-- 综合评分
-- 全部运行记录
-
-### `summary.tsv` / `summary.json`
-会汇总不同远端 profile 的最佳表现，帮助判断：
-- 哪个远端拥塞控制更优
-- 哪个 qdisc 更优
-- 本地窗口与本地最佳组合是什么
-
----
+综合评分不是只看速度，还会惩罚重传，所以更接近“速度高、重传低”的目标。
 
 ## 常用参数
 
-### `iperf3-easy.sh`
+主入口 `iperf3-easy.sh`：
+
 - `--server IP/HOST`
 - `--server-ssh USER@HOST`
-- `--client-ip IP`
 - `--target-mbps N`
+- `--remote-rtt-ms N`
+- `--client-ip IP`
 - `--port N`
 - `--profile fast|balanced|exhaustive`
 - `--remote-profile auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel`
@@ -191,63 +133,23 @@ sudo ./iperf3-remote.sh   --server-ssh root@1.2.3.4   --server 1.2.3.4   --clien
 - `--local-only`
 - `--yes`
 
-### `iperf3.sh`
-- `--server HOST`
-- `--port PORT`
-- `--target-mbps N`
-- `--max-mbps N`
-- `--profile fast|balanced|exhaustive`
+高级参数如果你需要细调，也可以继续透传到底层双端脚本：
+
 - `--coarse-seconds N`
 - `--fine-seconds N`
 - `--omit N`
 - `--bind IP`
 - `--skip-rx-copy`
-- `--sweep-local-sender`
-- `--rollback | --keep | --persist`
-- `--yes`
 
-### `iperf3-remote.sh`
-- `--server-ssh USER@HOST`
-- `--server IP`
-- `--client-ip IP`
-- `--target-mbps N`
-- `--remote-profile auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel`
-- `--profile NAME`
-- `--coarse-seconds N`
-- `--fine-seconds N`
-- `--omit N`
-- `--bind IP`
-- `--skip-rx-copy`
-- `--remote-keep`
-- `--remote-persist`
-- `--local-keep`
-- `--local-persist`
-- `--yes`
+## 前提条件
 
----
-
-## 当前建议
-
-如果你的目标是：
-> 自动把单流回程速度尽量做高，同时尽量压低重传
-
-优先使用：
-
-```bash
-sudo ./iperf3-easy.sh   --server SERVER   --server-ssh root@SERVER   --client-ip CLIENT_PUBLIC_IP   --target-mbps 目标速率   --yes
-```
-
-如果只是本机先试：
-
-```bash
-sudo ./iperf3-easy.sh --server SERVER --target-mbps 目标速率 --yes
-```
-
----
+- 本地和服务端都安装了 `iperf3`
+- 双端模式下，本地能 `ssh` 到服务端
+- 需要 `sudo`，因为脚本会调 `sysctl` / `tc`
 
 ## 注意事项
 
-- `-R` 模式下真正发送数据的是 server，所以远端调优通常比本地 `cc/qdisc` 更关键。
-- `-w` 不会被 sysctl 永久替代，复跑 iperf3 时仍建议显式带上。
-- `--persist` / `--remote-persist` 会写系统配置，生产机使用前先确认。
-- 如果链路本身抖动很大，结果会有波动，建议增加 `--fine-seconds` 后再测。
+- `-R` 模式下真正发数据的是服务端，所以远端 profile 往往比本地 sender 参数更关键。
+- `--persist` 和 `--remote-persist` 会写系统配置，生产机使用前先确认。
+- 链路波动大时，建议适当增加 `--fine-seconds` 再复测。
+- `run_best.sh` 适合复跑最佳参数，不等于永久系统最优，换线路后最好重新测。

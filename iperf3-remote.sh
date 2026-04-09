@@ -9,6 +9,7 @@ TARGET_MBPS=1000
 LOCAL_SCRIPT="./iperf3.sh"
 REMOTE_TUNE=1
 CLIENT_IP=""
+REMOTE_RTT_MS=""
 LOCAL_ACTION="rollback"
 REMOTE_KEEP=0
 REMOTE_PERSIST=0
@@ -36,7 +37,8 @@ cat <<'EOF'
 可选参数:
   --port PORT               iperf3 端口，默认 5201
   --target-mbps N           目标速率，默认 1000
-  --client-ip IP            client IP（供服务端测 RTT；建议填写）
+  --client-ip IP            可选；client 公网 IP（服务端能直 ping 时填写）
+  --remote-rtt-ms N         可选；没有 client 公网 IP 时手动指定 RTT 估值
   --remote-profile NAME     auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel，默认 auto
   --local-script PATH       本地 iperf3.sh 路径，默认 ./iperf3.sh
   --local-keep              本地测速后保留运行态
@@ -57,7 +59,6 @@ cat <<'EOF'
   sudo ./iperf3-remote.sh \
     --server-ssh root@1.2.3.4 \
     --server 1.2.3.4 \
-    --client-ip 5.6.7.8 \
     --remote-profile auto-all \
     --target-mbps 600
 EOF
@@ -70,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --port) SERVER_PORT="$2"; shift 2 ;;
     --target-mbps) TARGET_MBPS="$2"; shift 2 ;;
     --client-ip) CLIENT_IP="$2"; shift 2 ;;
+    --remote-rtt-ms) REMOTE_RTT_MS="$2"; shift 2 ;;
     --remote-profile) REMOTE_PROFILE="$2"; shift 2 ;;
     --local-script) LOCAL_SCRIPT="$2"; shift 2 ;;
     --local-keep) LOCAL_ACTION="keep"; shift ;;
@@ -84,7 +86,7 @@ while [[ $# -gt 0 ]]; do
     --remote-keep) REMOTE_KEEP=1; shift ;;
     --remote-persist) REMOTE_PERSIST=1; REMOTE_KEEP=1; shift ;;
     --no-remote-tune) REMOTE_TUNE=0; shift ;;
-    --help) usage; exit 0 ;;
+    --help|-h) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
   esac
 done
@@ -93,12 +95,14 @@ done
 [[ -z "$SERVER_IP" ]] && { echo "错误: 缺少 --server"; usage; exit 1; }
 [[ -x "$LOCAL_SCRIPT" ]] || { echo "错误: 本地脚本不存在或不可执行: $LOCAL_SCRIPT" >&2; exit 1; }
 [[ "$REMOTE_PROFILE" =~ ^(auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel)$ ]] || { echo "错误: --remote-profile 非法" >&2; exit 1; }
+[[ -z "$REMOTE_RTT_MS" || "$REMOTE_RTT_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "错误: --remote-rtt-ms 必须是数字" >&2; exit 1; }
 
 echo "[*] 远程调优目标: $SERVER_SSH"
 echo "[*] 服务端 IP: $SERVER_IP"
 echo "[*] 目标速率: ${TARGET_MBPS} Mbps"
 echo "[*] 远端 profile: ${REMOTE_PROFILE}"
 [[ -n "$CLIENT_IP" ]] && echo "[*] Client IP: $CLIENT_IP"
+[[ -n "$REMOTE_RTT_MS" ]] && echo "[*] 手动 RTT: ${REMOTE_RTT_MS} ms"
 echo
 
 REPORT_DIR="remote-auto-report_${SERVER_IP//[^[:alnum:]._-]/_}_${RUN_TS}"
@@ -110,7 +114,7 @@ printf "profile	best_mbps	local_cc	local_qdisc	local_win	log	report
 " > "$SUMMARY_TSV"
 
 remote_bootstrap() {
-  ssh "$SERVER_SSH" "CLIENT_IP='$CLIENT_IP' SERVER_PORT='$SERVER_PORT' TARGET_MBPS='$TARGET_MBPS' REMOTE_PERSIST='$REMOTE_PERSIST' REMOTE_PROFILE='$REMOTE_PROFILE' bash -s" <<'REMOTE_SCRIPT'
+  ssh "$SERVER_SSH" "CLIENT_IP='$CLIENT_IP' REMOTE_RTT_MS='$REMOTE_RTT_MS' SERVER_PORT='$SERVER_PORT' TARGET_MBPS='$TARGET_MBPS' REMOTE_PERSIST='$REMOTE_PERSIST' REMOTE_PROFILE='$REMOTE_PROFILE' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 PID_FILE=/tmp/iperf3-server.pid
 LOG_FILE=/tmp/iperf3-server.log
@@ -128,6 +132,18 @@ measure_rtt_ms() {
   line="$(printf '%s\n' "$out" | awk '/rtt min\/avg\/max|round-trip min\/avg\/max/ {print; exit}')"
   avg="$(printf '%s' "$line" | awk -F'/' 'NF>=2 {print $2}')"
   [[ -n "$avg" ]] && echo "$avg" || echo 50
+}
+
+resolve_rtt_ms() {
+  if [[ -n "${REMOTE_RTT_MS:-}" ]]; then
+    echo "$REMOTE_RTT_MS"
+    return 0
+  fi
+  if [[ -n "${CLIENT_IP:-}" ]]; then
+    measure_rtt_ms "$CLIENT_IP"
+    return 0
+  fi
+  echo 50
 }
 
 backup_key() {
@@ -166,8 +182,11 @@ apply_profile() {
 }
 
 echo "[远程] 测量 RTT..."
-RTT="$(measure_rtt_ms "$CLIENT_IP")"
+RTT="$(resolve_rtt_ms)"
 echo "[远程] RTT: ${RTT} ms"
+if [[ -z "${REMOTE_RTT_MS:-}" && -z "${CLIENT_IP:-}" ]]; then
+  echo "[远程] 未提供 client IP，使用保守默认 RTT=50ms"
+fi
 BDP=$(awk "BEGIN {print int(${TARGET_MBPS} * 1000000 / 8 * ${RTT} / 1000)}")
 WMEM_MAX=$(awk "BEGIN {print int(${BDP} * 4)}")
 [[ $WMEM_MAX -lt 16777216 ]] && WMEM_MAX=16777216
@@ -243,18 +262,27 @@ REMOTE_APPLY
 run_local_once() {
   local log_file="$1"
   local action_flag="--rollback"
+  local -a cmd
   case "$LOCAL_ACTION" in
     keep) action_flag="--keep" ;;
     persist) action_flag="--persist" ;;
   esac
-  "$LOCAL_SCRIPT" \
-    --server "$SERVER_IP" \
-    --port "$SERVER_PORT" \
-    --target-mbps "$TARGET_MBPS" \
-    --max-mbps "$TARGET_MBPS" \
-    --profile balanced \
-    "$action_flag" \
-    --yes | tee "$log_file"
+  cmd=(
+    "$LOCAL_SCRIPT"
+    --server "$SERVER_IP"
+    --port "$SERVER_PORT"
+    --target-mbps "$TARGET_MBPS"
+    --max-mbps "$TARGET_MBPS"
+    --profile "$LOCAL_PROFILE"
+    "$action_flag"
+  )
+  [[ -n "$LOCAL_COARSE" ]] && cmd+=(--coarse-seconds "$LOCAL_COARSE")
+  [[ -n "$LOCAL_FINE" ]] && cmd+=(--fine-seconds "$LOCAL_FINE")
+  [[ -n "$LOCAL_OMIT" ]] && cmd+=(--omit "$LOCAL_OMIT")
+  [[ -n "$LOCAL_BIND" ]] && cmd+=(--bind "$LOCAL_BIND")
+  [[ "$LOCAL_SKIP_RX_COPY" -eq 1 ]] && cmd+=(--skip-rx-copy)
+  [[ "$ASSUME_YES" -eq 1 ]] && cmd+=(--yes)
+  "${cmd[@]}" | tee "$log_file"
 }
 
 extract_best_mbps() {
