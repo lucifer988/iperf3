@@ -1395,7 +1395,7 @@ EOF
     fi
 
     PERSIST_DONE=1
-    log "已持久化：$sysctl_file"
+    log "已持久化本地 sysctl：$sysctl_file"
 }
 
 print_aggregated_top() {
@@ -1702,7 +1702,7 @@ run_local() {
 
 run_remote() {
   log "模式：双端联调"
-  log "自动目标：高吞吐、低重传"
+  log "主线目标：调优并持久化双端 sysctl.conf / sysctl.d，以提高吞吐、降低重传"
   build_ssh_cmd
   ensure_remote_deps
 
@@ -1856,7 +1856,7 @@ sysctl --system >/dev/null 2>&1 || true
 echo "[远程] 已持久化 profile=$profile cc=$cc qdisc=$qdisc iface=${iface:-unknown}"
 REMOTE_PERSIST_APPLY
         fi
-        echo "[*] 已选择：持久化最佳配置"
+        echo "[*] 已选择：持久化最佳配置（双端 sysctl 已落地；iperf3 的 -w 仍建议显式使用）"
         ;;
       *)
         ACTION="rollback"
