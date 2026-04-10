@@ -212,7 +212,7 @@ sudo ./iperf3-easy.sh \
 - `remote-auto-report_*/summary.tsv`
 - `remote-auto-report_*/summary.json`
 
-如果启用了 `auto-all`，还能看到不同远端 profile 的对比。
+如果启用了 `auto-all`，还能看到不同远端 profile 的对比，而且现在会优先按综合评分（吞吐 + 重传惩罚）选择最佳远端 profile。
 
 ---
 
@@ -253,5 +253,8 @@ sudo ./iperf3-easy.sh \
 - 修正本地调优引擎参数解析入口
 - 文档统一为 `iperf3-easy.sh`，避免再出现 `iperf3.sh` 的旧说法
 - README 补充 `--local-only` 和常用高级参数说明
+- auto-all 改为按综合评分选最佳远端 profile，不再只看 Mbps
+- auto-all 汇总补充 score / retrans 维度
+- 结果提取优先读取结构化 `final-summary.json`，降低对终端文案的依赖
 
 也就是说，现在仓库语义上和实现上都更接近真正的**单文件工作流**。

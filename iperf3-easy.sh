@@ -415,6 +415,7 @@ extract_best_meta() {
   python3 - "$f" <<'PY2'
 import json, re, sys
 from pathlib import Path
+
 text = Path(sys.argv[1]).read_text(encoding='utf-8', errors='ignore')
 meta = {
     'best_mbps': '',
@@ -426,6 +427,26 @@ meta = {
     'best_local_retrans': '',
     'report_path': '',
 }
+
+report_match = re.search(r'结构化汇总：\s*(.+)', text)
+if report_match:
+    report_path = report_match.group(1).strip()
+    meta['report_path'] = report_path
+    try:
+        obj = json.loads(Path(report_path).read_text(encoding='utf-8', errors='ignore'))
+        best = obj.get('best', {}) or {}
+        meta['best_mbps'] = str(best.get('mbps', ''))
+        meta['best_cc'] = str(best.get('cc', ''))
+        meta['best_qdisc'] = str(best.get('qdisc', ''))
+        meta['best_win'] = str(best.get('window', ''))
+        meta['best_score'] = str(best.get('score', ''))
+        meta['best_sender_retrans'] = str(best.get('sender_retrans', ''))
+        meta['best_local_retrans'] = str(best.get('local_retrans_delta', ''))
+        print(json.dumps(meta, ensure_ascii=False))
+        raise SystemExit
+    except Exception:
+        pass
+
 patterns = {
     'best_mbps': r'最佳中位数吞吐：\s*([0-9.]+)\s*Mbps',
     'best_cc': r'最佳参数：.*?cc=([^,\s]+)',
