@@ -492,6 +492,7 @@ obj = {
     "best_mbps": float(best_mbps or 0),
     "best_score": float(best_score or 0),
     "best_log": best_log,
+    "best_reason": "prefer higher score first, then higher mbps",
     "profiles": items,
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -506,6 +507,7 @@ print_auto_all_summary() {
   echo "[*] 最佳远端 profile: $best_profile"
   echo "[*] 最佳吞吐: ${best_mbps} Mbps"
   echo "[*] 最佳综合评分: ${best_score}"
+  echo "[*] 选择理由: 优先综合评分，若评分相同再选更高吞吐"
   [[ -n "$best_log" ]] && echo "[*] 最佳日志: $best_log"
   echo "[*] 各 profile 对比:"
   printf '%s\n' "$all_rows" | while IFS='|' read -r profile mbps score sender_retrans local_retrans cc qdisc win log report; do
@@ -1721,9 +1723,19 @@ run_remote() {
     SUMMARY_ROWS=""
     for profile in bbr-fq cubic-fq cubic-fq_codel; do
       echo "[*] 测试远端 profile: $profile"
-      [[ $REMOTE_TUNE -eq 1 ]] && remote_apply_profile "$profile"
+      if [[ $REMOTE_TUNE -eq 1 ]] && ! remote_apply_profile "$profile"; then
+        echo "[!] 跳过 profile=$profile：远端切换失败"
+        SUMMARY_ROWS+="${profile}|0|-999999|-1|-1|?|?|?|remote-profile-logs/${profile}.log|REMOTE_APPLY_FAILED"$'\n'
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$profile" "0" "-999999" "-1" "-1" "?" "?" "?" "remote-profile-logs/${profile}.log" "REMOTE_APPLY_FAILED" >> "$SUMMARY_TSV"
+        continue
+      fi
       out_file="remote-profile-logs/${profile}.log"
-      run_local_once "$out_file"
+      if ! run_local_once "$out_file"; then
+        echo "[!] 跳过 profile=$profile：本地调优/测速失败"
+        SUMMARY_ROWS+="${profile}|0|-999999|-1|-1|?|?|?|${out_file}|LOCAL_RUN_FAILED"$'\n'
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$profile" "0" "-999999" "-1" "-1" "?" "?" "?" "$out_file" "LOCAL_RUN_FAILED" >> "$SUMMARY_TSV"
+        continue
+      fi
       mbps="$(extract_best_mbps "$out_file")"
       [[ -z "$mbps" ]] && mbps=0
       meta_json="$(extract_best_meta "$out_file")"
