@@ -1,201 +1,176 @@
-# iperf3 自动调优脚本
+# iperf3 一键自动调优
 
-目标很直接：
+目标：
 
-- 尽量把 `iperf3 -R` 单流速度拉高
-- 同时把重传压低
-- 优先适配“本地没有公网 IP，但本地能 SSH 到服务端”的场景
-- 支持密码 SSH，不要求免密登录
+- 适合 **本地没有公网 IP** 的场景
+- 只需要你提供 **服务端 IP、SSH 密码、SSH 端口、目标网速**
+- 脚本自动完成双端联调
+- 自动根据链路和目标速率选择更合适的调优强度
+- 最终倾向：**吞吐高、重传低**
 
-仓库里有 4 个关键文件，但日常只需要记住 2 个：
+这个仓库现在保留 3 个文件：
 
-- `iperf3-easy.sh`：主入口，推荐直接用
-- `iperf3-remote.sh`：双端联调包装层
-- `iperf3.sh`：本地调优底层脚本
-- `iperf3-onekey-password.example.sh`：密码 SSH 的一键填写模板
+- `iperf3-easy.sh`：唯一入口，推荐只用它
+- `iperf3-remote.sh`：远端联调层
+- `iperf3.sh`：本地调优引擎
 
-## 适用场景
+---
 
-- 海外 server -> 大陆 client
-- 高 RTT / 高 BDP 链路
-- 你想根据目标带宽自动扫参数，而不是手工猜 `-w`
-- 你本地没有公网 IP，但可以 `ssh` 到服务端
+## 1. 安装依赖
 
-## 最符合你这种场景的用法
-
-如果你所有服务器都是“SSH 密码登录”，推荐直接用模板文件。
-
-### 1. 先装 `sshpass`
+本地机器执行：
 
 ```bash
 apt-get update
-apt-get install -y sshpass
+apt-get install -y iperf3 openssh-client sshpass python3 iproute2 iputils-ping
 ```
 
-### 2. 复制一键模板并填写
+服务端至少要有：
+
+```bash
+apt-get update
+apt-get install -y iperf3 iproute2 iputils-ping
+```
+
+> 脚本需要 `sudo/root`，因为会调整 `sysctl` 和 `tc`。
+
+---
+
+## 2. 一键使用
 
 ```bash
 git clone https://github.com/lucifer988/iperf3.git
 cd iperf3
-cp iperf3-onekey-password.example.sh iperf3-onekey-password.sh
-chmod +x iperf3-easy.sh iperf3.sh iperf3-remote.sh iperf3-onekey-password.sh
+chmod +x iperf3-easy.sh iperf3-remote.sh iperf3.sh
+sudo ./iperf3-easy.sh --interactive
 ```
 
-编辑 `iperf3-onekey-password.sh`，把这些值换成你自己的：
+运行后会问你：
+
+- 服务端 IP / 域名
+- SSH 用户名（默认 `root`）
+- SSH 地址
+- SSH 密码
+- SSH 端口
+- 目标单流 Mbps
+- `iperf3` 端口
+- 可选 RTT
+- 可选本地公网 IP
+
+如果你什么都不懂，按默认走也可以。
+
+---
+
+## 3. 它会自动做什么
+
+`iperf3-easy.sh --interactive` 会自动：
+
+1. 根据你的目标网速和 RTT，选择 `fast / balanced / exhaustive`
+2. 本地通过 SSH 登录远端
+3. 远端自动准备 `iperf3 server`
+4. 自动尝试不同远端发送 profile
+5. 本地自动搜索更合适的窗口/接收参数
+6. 根据 **速度** 和 **重传** 综合选择更优结果
+
+默认更适合这类链路：
+
+- 海外 server -> 国内 client
+- 高 RTT
+- 本地无公网 IP
+- 只能主动 SSH 到服务端
+
+---
+
+## 4. 最常用命令
+
+### 交互式，最推荐
 
 ```bash
-SERVER_IP="205.198.92.203"
-SSH_HOST="205.198.92.203"
-SSH_USER="root"
-SSH_PASS="你的SSH密码"
-SSH_PORT="22"
-TARGET_MBPS="1000"
-REMOTE_RTT_MS="180"
+sudo ./iperf3-easy.sh --interactive
 ```
 
-### 3. 直接运行
-
-```bash
-./iperf3-onekey-password.sh
-```
-
-这就是最省事的“一键脚本填信息后直接跑”路径。
-
-## 也可以不用模板，直接命令行跑
-
-```bash
-sudo ./iperf3-easy.sh \
-  --server 205.198.92.203 \
-  --server-ssh root@205.198.92.203 \
-  --server-ssh-pass '你的SSH密码' \
-  --target-mbps 1000 \
-  --remote-rtt-ms 180 \
-  --yes
-```
-
-它的含义是：
-
-- 本地通过 SSH 登录服务端
-- SSH 可以走密码认证，不要求免密
-- 服务端自动切换发送侧 profile
-- 本地自动搜索 `cc/qdisc/window`
-- 最终按“速度高、重传低”的综合分数选最优组合
-
-## 没有公网 IP 也能用
-
-现在双端模式默认不再要求 `--client-ip`，也不要求 SSH 免密。
-
-如果你满足下面这个条件，就可以直接用上面的主命令：
-
-- 本地能 SSH 到服务端
-- 服务端不需要主动回连你的本地
-
-### 可选增强
-
-如果你知道链路 RTT，可以手动给一个估值，让远端初始参数更贴近实际：
+### 非交互方式
 
 ```bash
 sudo ./iperf3-easy.sh \
   --server 1.2.3.4 \
   --server-ssh root@1.2.3.4 \
   --server-ssh-pass '你的SSH密码' \
+  --server-ssh-port 22 \
   --target-mbps 1000 \
-  --remote-rtt-ms 180 \
   --yes
 ```
 
-如果你本地真的有可达公网 IP，也可以补 `--client-ip`，让服务端直接测 RTT：
+### 如果你知道 RTT，可以补进去
 
 ```bash
 sudo ./iperf3-easy.sh \
   --server 1.2.3.4 \
   --server-ssh root@1.2.3.4 \
   --server-ssh-pass '你的SSH密码' \
-  --client-ip 5.6.7.8 \
+  --server-ssh-port 22 \
   --target-mbps 1000 \
+  --remote-rtt-ms 180 \
   --yes
 ```
 
-## 只做本地调优
+---
 
-如果你暂时不想 SSH 控远端：
+## 5. 输出结果看哪里
 
-```bash
-sudo ./iperf3-easy.sh \
-  --server 1.2.3.4 \
-  --local-only \
-  --target-mbps 1000 \
-  --yes
-```
-
-或者干脆不传 `--server-ssh`，也会自动落到本地模式。
-
-## 脚本会做什么
-
-`iperf3-easy.sh` 会根据你有没有提供 `--server-ssh` 自动切模式：
-
-- 有 `--server-ssh`：走双端联调
-- 没有 `--server-ssh`：只做本地调优
-
-双端联调时会做这些事：
-
-1. 远端准备 iperf3 server，并切换发送侧 profile
-2. 本地自动跑粗筛 + 精测
-3. 对 `bbr-fq` / `cubic-fq` / `cubic-fq_codel` 做对比
-4. 按吞吐和重传综合选出最佳结果
-
-## 输出结果
-
-本地调优结果目录里主要看：
+主要看：
 
 - `summary.csv`
 - `final-summary.json`
 - `run_best.sh`
+- 双端模式下的 `summary.tsv`
+- 双端模式下的 `summary.json`
 
-双端联调额外会产出：
+重点关注：
 
-- `summary.tsv`
-- `summary.json`
+- 最佳中位数吞吐
+- 最佳参数组合
+- 重传是否明显下降
 
-综合评分不是只看速度，还会惩罚重传，所以更接近“速度高、重传低”的目标。
+---
 
-## 常用参数
+## 6. 保留/回滚策略
 
-主入口 `iperf3-easy.sh`：
+默认：测速完成后回滚。
 
-- `--server IP/HOST`
-- `--server-ssh USER@HOST`
-- `--server-ssh-pass PASS`
-- `--server-ssh-port PORT`
-- `--target-mbps N`
-- `--remote-rtt-ms N`
-- `--client-ip IP`
-- `--port N`
-- `--profile fast|balanced|exhaustive`
-- `--remote-profile auto|auto-all|bbr-fq|cubic-fq|cubic-fq_codel`
-- `--rollback | --keep | --persist`
-- `--local-only`
-- `--yes`
+如果你想保留本地最佳运行态：
 
-高级参数如果你需要细调，也可以继续透传到底层双端脚本：
+```bash
+sudo ./iperf3-easy.sh --interactive --keep
+```
 
-- `--coarse-seconds N`
-- `--fine-seconds N`
-- `--omit N`
-- `--bind IP`
-- `--skip-rx-copy`
+如果你想持久化本地运行态：
 
-## 前提条件
+```bash
+sudo ./iperf3-easy.sh --interactive --persist
+```
 
-- 本地和服务端都安装了 `iperf3`
-- 双端模式下，本地能 `ssh` 到服务端
-- 如果你走密码 SSH，本机需要 `sshpass`
-- 需要 `sudo`，因为脚本会调 `sysctl` / `tc`
+---
 
-## 注意事项
+## 7. 适合你的使用方式
 
-- `-R` 模式下真正发数据的是服务端，所以远端 profile 往往比本地 sender 参数更关键。
-- `--server-ssh-pass` 会出现在 shell 历史里；长期用建议改成模板文件或环境变量。
-- `--persist` 和 `--remote-persist` 会写系统配置，生产机使用前先确认。
-- 链路波动大时，建议适当增加 `--fine-seconds` 再复测。
-- `run_best.sh` 适合复跑最佳参数，不等于永久系统最优，换线路后最好重新测。
+你这种场景，直接复制：
+
+```bash
+git clone https://github.com/lucifer988/iperf3.git
+cd iperf3
+apt-get update
+apt-get install -y iperf3 openssh-client sshpass python3 iproute2 iputils-ping
+chmod +x iperf3-easy.sh iperf3-remote.sh iperf3.sh
+sudo ./iperf3-easy.sh --interactive
+```
+
+---
+
+## 8. 注意
+
+- `-R` 模式下，真正发送数据的是服务端，所以远端 profile 很关键
+- 如果你不提供公网 IP，脚本也能跑
+- 如果你知道 RTT，填上通常更准
+- `--server-ssh-pass` 会留在 shell 历史里，长期建议交互输入
+- 换线路、换机房、换目标带宽后，建议重新跑一次
