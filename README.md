@@ -163,10 +163,24 @@ sudo ./iperf3-easy.sh \
 - `--fine-seconds N`
 - `--omit N`
 - `--bind IP`
+- `--improve-mbps-threshold N`
+- `--improve-score-threshold N`
+- `--max-stale-rounds N`
 - `--skip-rx-copy`
 - `--keep` / `--persist` / `--rollback`
 
 ---
+
+
+### 提前停止现在更像真的“智能”了
+
+这版把之前挂着没生效的几个参数真正接进精测阶段：
+
+- `--improve-mbps-threshold`：如果最佳吞吐还在明显上涨，就继续测
+- `--improve-score-threshold`：如果综合评分还在明显上涨，也继续测
+- `--max-stale-rounds`：达到目标后，允许连续多少轮“没有明显提升”再提前结束
+
+这样不是一到目标值就草率停，而是会看：**是不是已经够快、而且继续测也没太大收益了**。
 
 ## 它怎么决定参数
 

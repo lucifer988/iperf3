@@ -51,6 +51,9 @@ cat <<'USAGE'
   --fine-seconds N
   --omit N
   --bind IP
+  --improve-mbps-threshold N
+  --improve-score-threshold N
+  --max-stale-rounds N
   --skip-rx-copy
   --rollback                跑完回滚（默认）
   --keep                    跑完保留运行态
@@ -584,6 +587,9 @@ cat <<'USAGE'
   --ping-interval SEC         ping 间隔秒数，默认 0.2
   --top-n N                   粗筛后进入精测的候选数，默认 2
   --fine-repeats N            每个精测候选重复次数，默认 2
+  --improve-mbps-threshold N  提前停止时认定“仍有明显提升”的 Mbps 阈值，默认 0.8
+  --improve-score-threshold N 提前停止时认定“仍有明显提升”的综合评分阈值，默认 5
+  --max-stale-rounds N        达标后允许连续“无明显提升”的轮数，默认 2
 
 行为开关：
   --stop-early                达标后提前结束（默认开启）
@@ -1239,6 +1245,32 @@ for med_score, med_mbps, med_sender, med_local, n, key in ranked[:top_n]:
 PY
 }
 
+should_stop_after_fine_round() {
+    local rounds_done="$1" current_best_score="$2" current_best_mbps="$3" target_mbps="$4" last_best_score="$5" last_best_mbps="$6" stale_rounds="$7"
+    python3 - "$rounds_done" "$current_best_score" "$current_best_mbps" "$target_mbps" "$last_best_score" "$last_best_mbps" "$stale_rounds" "$IMPROVE_SCORE_THRESHOLD" "$IMPROVE_MBPS_THRESHOLD" "$MAX_STALE_ROUNDS" <<'PY_STOP'
+import sys
+rounds_done = int(sys.argv[1])
+current_best_score = float(sys.argv[2])
+current_best_mbps = float(sys.argv[3])
+target_mbps = float(sys.argv[4])
+last_best_score = float(sys.argv[5])
+last_best_mbps = float(sys.argv[6])
+stale_rounds = int(sys.argv[7])
+score_threshold = float(sys.argv[8])
+mbps_threshold = float(sys.argv[9])
+max_stale_rounds = int(sys.argv[10])
+if rounds_done <= 0:
+    print(0)
+    raise SystemExit
+reached_target = current_best_mbps >= target_mbps
+score_gain = current_best_score - last_best_score
+mbps_gain = current_best_mbps - last_best_mbps
+improved = (score_gain >= score_threshold) or (mbps_gain >= mbps_threshold)
+should_stop = reached_target and stale_rounds >= max_stale_rounds and not improved
+print(1 if should_stop else 0)
+PY_STOP
+}
+
 write_best_helper() {
     local best_cc="$1" best_qdisc="$2" best_win="$3"
     cat > "$BEST_HELPER" <<EOF
@@ -1380,8 +1412,9 @@ select_best_overall() {
 
 local_engine_main() {
     local RTT_AVG_MS RTT_AVG_S BDP_BYTES BUF_MAX_BYTES
-    local coarse_ranked fine_candidates reached choice
-    local line cc qdisc win i reached_flag
+    local coarse_ranked fine_candidates choice
+    local line cc qdisc win i reached_flag rounds_done=0 stale_rounds=0
+    local current_best_line current_best_score current_best_mbps last_best_score=-999999 last_best_mbps=0 stop_now=0
 
     local_parse_args "$@"
     apply_profile_defaults
@@ -1469,13 +1502,44 @@ PY
     fi
 
     echo
-    log "阶段 2：精测（${FINE_DURATION}s，重复 ${FINE_REPEATS} 次）"
+    log "阶段 2：精测（${FINE_DURATION}s，每轮重复 ${FINE_REPEATS} 次）"
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         IFS='|' read -r cc qdisc win _ <<< "$line"
         for (( i=1; i<=FINE_REPEATS; i++ )); do
             run_iperf_once fine "$cc" "$qdisc" "$win" "$FINE_DURATION" || true
         done
+
+        rounds_done=$((rounds_done + 1))
+        current_best_line="$(rank_candidates fine 1 | sed -n '1p')"
+        if [[ -n "$current_best_line" ]]; then
+            current_best_score="$(awk -F'|' '{print $8}' <<< "$current_best_line")"
+            current_best_mbps="$(awk -F'|' '{print $4}' <<< "$current_best_line")"
+            if python3 - "$current_best_score" "$last_best_score" "$current_best_mbps" "$last_best_mbps" "$IMPROVE_SCORE_THRESHOLD" "$IMPROVE_MBPS_THRESHOLD" <<'PY_IMPROVE' >/dev/null
+import sys
+current_score=float(sys.argv[1])
+last_score=float(sys.argv[2])
+current_mbps=float(sys.argv[3])
+last_mbps=float(sys.argv[4])
+score_threshold=float(sys.argv[5])
+mbps_threshold=float(sys.argv[6])
+raise SystemExit(0 if ((current_score-last_score) >= score_threshold or (current_mbps-last_mbps) >= mbps_threshold) else 1)
+PY_IMPROVE
+            then
+                stale_rounds=0
+            else
+                stale_rounds=$((stale_rounds + 1))
+            fi
+            log "精测进展：best=${current_best_mbps} Mbps score=${current_best_score} | stale_rounds=${stale_rounds}/${MAX_STALE_ROUNDS}"
+            stop_now="$(should_stop_after_fine_round "$rounds_done" "$current_best_score" "$current_best_mbps" "$TARGET_MBPS" "$last_best_score" "$last_best_mbps" "$stale_rounds")"
+            stop_now="$(tr -d '[:space:]' <<< "$stop_now")"
+            last_best_score="$current_best_score"
+            last_best_mbps="$current_best_mbps"
+            if [[ "$STOP_EARLY" -eq 1 && "$stop_now" == "1" ]]; then
+                log "精测阶段提前结束：已达到目标吞吐，且连续 ${stale_rounds} 轮无明显提升。"
+                break
+            fi
+        fi
     done <<< "$fine_candidates"
 
     select_best_overall || die "未选出有效最佳结果。"
@@ -1707,6 +1771,7 @@ CLEANUP
   echo "[*] 全部完成！"
 }
 
+need_root
 ensure_local_deps
 if [[ "$LOCAL_ONLY" -eq 1 || -z "$SERVER_SSH" ]]; then
   run_local
