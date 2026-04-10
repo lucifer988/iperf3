@@ -521,6 +521,20 @@ print_auto_all_summary() {
 
 
 
+print_auto_all_reuse_hint() {
+  local best_profile="$1"
+  echo
+  echo "[*] 下次若要直接复用当前最优远端档位，可优先试："
+  printf '    sudo ./iperf3-easy.sh --server %q --server-ssh %q --server-ssh-port %q --target-mbps %q --remote-profile %q --yes\n' \
+    "$SERVER" "$SERVER_SSH" "$SERVER_SSH_PORT" "$TARGET_MBPS" "$best_profile"
+  if [[ -n "$REMOTE_RTT_MS" ]]; then
+    printf '    # 如需保留 RTT 估值，再补：--remote-rtt-ms %q\n' "$REMOTE_RTT_MS"
+  fi
+  if [[ -n "$CLIENT_IP" ]]; then
+    printf '    # 如需让远端直测你的公网地址，再补：--client-ip %q\n' "$CLIENT_IP"
+  fi
+}
+
 # ===== embedded local tuning engine =====
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_VERSION="5.0.1"
@@ -1789,6 +1803,7 @@ PY2
     done
     write_auto_all_summary_json "$SUMMARY_ROWS" "$BEST_PROFILE" "$BEST_MBPS" "$BEST_SCORE" "$BEST_LOG"
     print_auto_all_summary "$BEST_PROFILE" "$BEST_MBPS" "$BEST_SCORE" "$BEST_LOG" "$SUMMARY_ROWS"
+    [[ -n "$BEST_PROFILE" ]] && print_auto_all_reuse_hint "$BEST_PROFILE"
     echo "[*] 汇总 TSV: $SUMMARY_TSV"
     echo "[*] 汇总 JSON: $SUMMARY_JSON"
     if [[ -n "$BEST_PROFILE" && $REMOTE_TUNE -eq 1 ]]; then

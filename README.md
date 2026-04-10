@@ -212,7 +212,7 @@ sudo ./iperf3-easy.sh \
 - `remote-auto-report_*/summary.tsv`
 - `remote-auto-report_*/summary.json`
 
-如果启用了 `auto-all`，还能看到不同远端 profile 的对比，而且现在会优先按综合评分（吞吐 + 重传惩罚）选择最佳远端 profile。
+如果启用了 `auto-all`，还能看到不同远端 profile 的对比，而且现在会优先按综合评分（吞吐 + 重传惩罚）选择最佳远端 profile。跑完后还会额外给出一个“下次直接复用”的推荐命令。
 
 ---
 
