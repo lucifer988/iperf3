@@ -55,9 +55,9 @@ cat <<'USAGE'
   --improve-score-threshold N
   --max-stale-rounds N
   --skip-rx-copy
-  --rollback                跑完回滚（默认）
+  --rollback                跑完回滚（默认；交互模式会在结束时再次询问）
   --keep                    跑完保留运行态
-  --persist                 跑完持久化本地运行态
+  --persist                 跑完持久化本地/远端运行态
   --local-only              仅做本地调优
   --yes                     非交互
   --help                    显示帮助
@@ -156,6 +156,7 @@ run_interactive() {
   if [[ -z "$CLIENT_IP" && -z "$REMOTE_RTT_MS" ]]; then
     warn "你没填公网 IP / RTT，脚本会用保守 RTT 估值进行远端预调。"
   fi
+  ACTION="ask"
   YES=1
 }
 
@@ -386,6 +387,7 @@ run_local_once() {
   case "$ACTION" in
     keep) action_flag="--keep"; REMOTE_KEEP=1 ;;
     persist) action_flag="--persist"; REMOTE_KEEP=1; REMOTE_PERSIST=1 ;;
+    ask) action_flag="--rollback" ;;
   esac
   cmd=(
     "$LOCAL_SCRIPT"
@@ -1816,6 +1818,53 @@ PY2
   fi
 
   echo
+  if [[ "$ACTION" == "ask" ]]; then
+    echo "接下来你决定："
+    echo " 1) 仅查看结果并回滚（默认）"
+    echo " 2) 保留最佳运行态（本地 + 远端）"
+    echo " 3) 持久化最佳配置（本地 + 远端；推荐）"
+    choice="$(prompt_default '请选择 1/2/3' '3')"
+    case "$choice" in
+      2)
+        ACTION="keep"
+        REMOTE_KEEP=1
+        echo "[*] 已选择：保留最佳运行态"
+        ;;
+      3)
+        ACTION="persist"
+        REMOTE_KEEP=1
+        REMOTE_PERSIST=1
+        if [[ -n "$BEST_PROFILE" && $REMOTE_TUNE -eq 1 ]]; then
+          echo "[*] 正在将最佳远端 profile 持久化到服务端..."
+          "${SSH_CMD[@]}" "$SERVER_SSH" "REMOTE_PROFILE='$BEST_PROFILE' REMOTE_PERSIST='1' bash -s" <<'REMOTE_PERSIST_APPLY'
+set -euo pipefail
+profile="$REMOTE_PROFILE"
+case "$profile" in
+  bbr-fq) cc=bbr; qdisc=fq ;;
+  cubic-fq) cc=cubic; qdisc=fq ;;
+  cubic-fq_codel) cc=cubic; qdisc=fq_codel ;;
+  *) echo "未知远端 profile: $profile" >&2; exit 1 ;;
+esac
+sysctl -w net.ipv4.tcp_congestion_control="$cc" >/dev/null 2>&1 || true
+sysctl -w net.core.default_qdisc="$qdisc" >/dev/null 2>&1 || true
+iface="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+if [[ -n "$iface" ]]; then
+  tc qdisc replace dev "$iface" root "$qdisc" >/dev/null 2>&1 || true
+fi
+printf '%s\n' "net.ipv4.tcp_congestion_control=$cc" "net.core.default_qdisc=$qdisc" > /etc/sysctl.d/99-iperf3-remote-profile.conf
+sysctl --system >/dev/null 2>&1 || true
+echo "[远程] 已持久化 profile=$profile cc=$cc qdisc=$qdisc iface=${iface:-unknown}"
+REMOTE_PERSIST_APPLY
+        fi
+        echo "[*] 已选择：持久化最佳配置"
+        ;;
+      *)
+        ACTION="rollback"
+        echo "[*] 已选择：仅查看结果并回滚"
+        ;;
+    esac
+  fi
+
   if [[ $REMOTE_TUNE -eq 1 && $REMOTE_KEEP -eq 0 && "$ACTION" == "rollback" ]]; then
     echo "[*] 步骤 3: 清理服务端..."
     "${SSH_CMD[@]}" "$SERVER_SSH" bash -s <<'CLEANUP'
