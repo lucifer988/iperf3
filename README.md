@@ -54,6 +54,8 @@ sudo ./iperf3-easy.sh --interactive
 sudo ./iperf3-easy.sh --interactive
 ```
 
+如果你已经知道参数，也可以直接非交互运行。
+
 ---
 
 ## 运行时会问你什么
@@ -139,6 +141,31 @@ sudo ./iperf3-easy.sh \
   --yes
 ```
 
+如果你只想在本机做接收侧调优，不碰远端：
+
+```bash
+sudo ./iperf3-easy.sh \
+  --server 1.2.3.4 \
+  --target-mbps 1000 \
+  --local-only \
+  --yes
+```
+
+如果你想更慢一点但测得更稳，可以加：
+
+```bash
+  --profile balanced
+```
+
+或手动指定：
+
+- `--coarse-seconds N`
+- `--fine-seconds N`
+- `--omit N`
+- `--bind IP`
+- `--skip-rx-copy`
+- `--keep` / `--persist` / `--rollback`
+
 ---
 
 ## 它怎么决定参数
@@ -203,3 +230,14 @@ sudo ./iperf3-easy.sh \
 - 知道 RTT 的话，填上通常更准
 - 换线路、换机房、换运营商、换目标带宽之后，建议重新跑一次
 - 如果你用 `--server-ssh-pass`，密码会出现在 shell 历史里，所以长期建议优先用交互模式
+
+## 这次继续优化了什么
+
+这版继续把单文件模式收干净了：
+
+- 修正单文件脚本内部残留的旧入口引用
+- 修正本地调优引擎参数解析入口
+- 文档统一为 `iperf3-easy.sh`，避免再出现 `iperf3.sh` 的旧说法
+- README 补充 `--local-only` 和常用高级参数说明
+
+也就是说，现在仓库语义上和实现上都更接近真正的**单文件工作流**。

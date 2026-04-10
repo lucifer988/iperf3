@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_SCRIPT="$SCRIPT_DIR/iperf3.sh"
+LOCAL_SCRIPT="$SCRIPT_DIR/iperf3-easy.sh"
 
 SERVER="${IPERF3_SERVER:-}"
 SERVER_SSH="${IPERF3_SERVER_SSH:-}"
@@ -516,6 +516,9 @@ TOP_N=2
 FINE_REPEATS=2
 BUFFER_MIN_MB=32
 BUFFER_CAP_MB=256
+IMPROVE_MBPS_THRESHOLD=0.8
+IMPROVE_SCORE_THRESHOLD=5
+MAX_STALE_ROUNDS=2
 
 # 显式参数覆盖标记（避免 profile 默认值覆盖用户手工指定）
 COARSE_SET=0
@@ -561,7 +564,7 @@ declare -A BEST_META=()
 local_usage() {
 cat <<'USAGE'
 用法：
-  sudo bash iperf3.sh [选项]
+  sudo bash iperf3-easy.sh [选项]
 
 核心选项：
   --server HOST               iperf3 server IP/域名
@@ -800,6 +803,9 @@ local_parse_args() {
             --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
             --top-n) TOP_N="${2:-}"; TOP_N_SET=1; shift 2 ;;
             --fine-repeats) FINE_REPEATS="${2:-}"; FINE_REPEATS_SET=1; shift 2 ;;
+            --improve-mbps-threshold) IMPROVE_MBPS_THRESHOLD="${2:-}"; shift 2 ;;
+            --improve-score-threshold) IMPROVE_SCORE_THRESHOLD="${2:-}"; shift 2 ;;
+            --max-stale-rounds) MAX_STALE_ROUNDS="${2:-}"; shift 2 ;;
             --stop-early) STOP_EARLY=1; shift ;;
             --no-stop-early) STOP_EARLY=0; shift ;;
             --sweep-local-sender) SWEEP_LOCAL_SENDER=1; shift ;;
@@ -826,6 +832,9 @@ validate_numbers() {
     [[ "$OMIT_SECONDS" =~ ^[0-9]+$ ]] || die "--omit 必须是整数"
     [[ "$TOP_N" =~ ^[0-9]+$ ]] || die "--top-n 必须是整数"
     [[ "$FINE_REPEATS" =~ ^[0-9]+$ ]] || die "--fine-repeats 必须是整数"
+    [[ "$IMPROVE_MBPS_THRESHOLD" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--improve-mbps-threshold 必须是数字"
+    [[ "$IMPROVE_SCORE_THRESHOLD" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--improve-score-threshold 必须是数字"
+    [[ "$MAX_STALE_ROUNDS" =~ ^[0-9]+$ ]] || die "--max-stale-rounds 必须是整数"
     [[ "$MTU_PROBING" =~ ^[012]$ ]] || die "--mtu-probing 只能是 0/1/2"
 }
 
@@ -1374,7 +1383,7 @@ local_engine_main() {
     local coarse_ranked fine_candidates reached choice
     local line cc qdisc win i reached_flag
 
-    parse_args "$@"
+    local_parse_args "$@"
     apply_profile_defaults
     interactive_fill
     validate_numbers
