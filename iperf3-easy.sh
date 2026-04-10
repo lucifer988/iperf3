@@ -1851,12 +1851,23 @@ iface="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i
 if [[ -n "$iface" ]]; then
   tc qdisc replace dev "$iface" root "$qdisc" >/dev/null 2>&1 || true
 fi
-printf '%s\n' "net.ipv4.tcp_congestion_control=$cc" "net.core.default_qdisc=$qdisc" > /etc/sysctl.d/99-iperf3-remote-profile.conf
+printf '%s\n' "net.ipv4.tcp_congestion_control=$cc" "net.core.default_qdisc=$qdisc" > /etc/sysctl.d/99-iperf3-server-tune.conf
 sysctl --system >/dev/null 2>&1 || true
 echo "[远程] 已持久化 profile=$profile cc=$cc qdisc=$qdisc iface=${iface:-unknown}"
 REMOTE_PERSIST_APPLY
         fi
         echo "[*] 已选择：持久化最佳配置（双端 sysctl 已落地；iperf3 的 -w 仍建议显式使用）"
+        if [[ "$INTERACTIVE" -eq 1 ]]; then
+          echo
+          echo "是否清理本次本地测试结果目录？"
+          echo " 1) 保留结果（默认）"
+          echo " 2) 清理本地结果文件"
+          cleanup_choice="$(prompt_default '请选择 1/2' '1')"
+          case "$cleanup_choice" in
+            2) cleanup_local_results ;;
+            *) echo "[*] 已保留本地结果目录" ;;
+          esac
+        fi
         ;;
       *)
         ACTION="rollback"
