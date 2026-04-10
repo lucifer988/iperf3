@@ -384,8 +384,8 @@ run_local_once() {
   local action_flag="--rollback"
   local -a cmd
   case "$ACTION" in
-    keep) action_flag="--keep" ;;
-    persist) action_flag="--persist" ;;
+    keep) action_flag="--keep"; REMOTE_KEEP=1 ;;
+    persist) action_flag="--persist"; REMOTE_KEEP=1; REMOTE_PERSIST=1 ;;
   esac
   cmd=(
     "$LOCAL_SCRIPT"
@@ -421,14 +421,20 @@ meta = {
     'best_cc': '',
     'best_qdisc': '',
     'best_win': '',
+    'best_score': '',
+    'best_sender_retrans': '',
+    'best_local_retrans': '',
     'report_path': '',
 }
 patterns = {
     'best_mbps': r'最佳中位数吞吐：\s*([0-9.]+)\s*Mbps',
     'best_cc': r'最佳参数：.*?cc=([^,\s]+)',
     'best_qdisc': r'最佳参数：.*?qdisc=([^,\s]+)',
-    'best_win': r'最佳参数：.*?win=([^,\s]+)',
-    'report_path': r'报告路径：\s*(.+)',
+    'best_win': r'最佳参数：.*?w(?:in)?=([^,\s]+)',
+    'best_score': r'综合评分：\s*([0-9.+-]+)',
+    'best_sender_retrans': r'sender_retrans（中位数）：\s*([0-9-]+)',
+    'best_local_retrans': r'本地 TcpRetransSegs Δ（中位数）：\s*([0-9-]+)',
+    'report_path': r'结构化汇总：\s*(.+)',
 }
 for key, pattern in patterns.items():
     m = re.search(pattern, text)
@@ -439,18 +445,21 @@ PY2
 }
 
 write_auto_all_summary_json() {
-  local rows="$1" best_profile="$2" best_mbps="$3" best_log="$4"
-  python3 - "$rows" "$best_profile" "$best_mbps" "$best_log" "$SUMMARY_JSON" <<'PY2'
+  local rows="$1" best_profile="$2" best_mbps="$3" best_score="$4" best_log="$5"
+  python3 - "$rows" "$best_profile" "$best_mbps" "$best_score" "$best_log" "$SUMMARY_JSON" <<'PY2'
 import json, sys
-rows_text, best_profile, best_mbps, best_log, out = sys.argv[1:]
+rows_text, best_profile, best_mbps, best_score, best_log, out = sys.argv[1:]
 items = []
 for line in rows_text.splitlines():
     if not line.strip():
         continue
-    profile, mbps, cc, qdisc, win, log, report = line.split('|', 6)
+    profile, mbps, score, sender_retrans, local_retrans, cc, qdisc, win, log, report = line.split('|', 9)
     items.append({
         "profile": profile,
         "best_mbps": float(mbps or 0),
+        "best_score": float(score or 0),
+        "best_sender_retrans": int(float(sender_retrans or 0)),
+        "best_local_retrans": int(float(local_retrans or 0)),
         "local_cc": cc,
         "local_qdisc": qdisc,
         "local_win": win,
@@ -460,6 +469,7 @@ for line in rows_text.splitlines():
 obj = {
     "best_profile": best_profile,
     "best_mbps": float(best_mbps or 0),
+    "best_score": float(best_score or 0),
     "best_log": best_log,
     "profiles": items,
 }
@@ -469,17 +479,18 @@ PY2
 }
 
 print_auto_all_summary() {
-  local best_profile="$1" best_mbps="$2" best_log="$3" all_rows="$4"
+  local best_profile="$1" best_mbps="$2" best_score="$3" best_log="$4" all_rows="$5"
   echo
   echo "[*] auto-all 汇总"
   echo "[*] 最佳远端 profile: $best_profile"
   echo "[*] 最佳吞吐: ${best_mbps} Mbps"
+  echo "[*] 最佳综合评分: ${best_score}"
   [[ -n "$best_log" ]] && echo "[*] 最佳日志: $best_log"
   echo "[*] 各 profile 对比:"
-  printf '%s\n' "$all_rows" | while IFS='|' read -r profile mbps cc qdisc win log report; do
+  printf '%s\n' "$all_rows" | while IFS='|' read -r profile mbps score sender_retrans local_retrans cc qdisc win log report; do
     [[ -n "$profile" ]] || continue
-    printf '    - %-14s %10s Mbps | local(cc=%s qdisc=%s win=%s) | log=%s' \
-      "$profile" "$mbps" "${cc:-?}" "${qdisc:-?}" "${win:-?}" "$log"
+    printf '    - %-14s %10s Mbps | score=%s | retrans=%s/%s | local(cc=%s qdisc=%s win=%s) | log=%s' \
+      "$profile" "$mbps" "${score:-?}" "${sender_retrans:-?}" "${local_retrans:-?}" "${cc:-?}" "${qdisc:-?}" "${win:-?}" "$log"
     [[ -n "$report" ]] && printf ' | report=%s' "$report"
     printf '\n'
   done
@@ -1684,6 +1695,7 @@ run_remote() {
     mkdir -p remote-profile-logs
     BEST_PROFILE=""
     BEST_MBPS="0"
+    BEST_SCORE="-999999"
     BEST_LOG=""
     SUMMARY_ROWS=""
     for profile in bbr-fq cubic-fq cubic-fq_codel; do
@@ -1709,22 +1721,41 @@ import json, sys
 print(json.loads(sys.argv[1]).get('best_win',''))
 PY2
 )"
+      score="$(python3 - <<'PY2' "$meta_json"
+import json, sys
+print(json.loads(sys.argv[1]).get('best_score',''))
+PY2
+)"
+      sender_retrans="$(python3 - <<'PY2' "$meta_json"
+import json, sys
+print(json.loads(sys.argv[1]).get('best_sender_retrans',''))
+PY2
+)"
+      local_retrans="$(python3 - <<'PY2' "$meta_json"
+import json, sys
+print(json.loads(sys.argv[1]).get('best_local_retrans',''))
+PY2
+)"
       report="$(python3 - <<'PY2' "$meta_json"
 import json, sys
 print(json.loads(sys.argv[1]).get('report_path',''))
 PY2
 )"
-      echo "[*] profile=$profile best_mbps=$mbps local_best=(cc=${cc:-?} qdisc=${qdisc:-?} win=${win:-?})"
-      SUMMARY_ROWS+="${profile}|${mbps}|${cc}|${qdisc}|${win}|${out_file}|${report}"$'\n'
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$profile" "$mbps" "$cc" "$qdisc" "$win" "$out_file" "$report" >> "$SUMMARY_TSV"
-      if awk "BEGIN {exit !($mbps > $BEST_MBPS)}"; then
+      [[ -z "$score" ]] && score=-999999
+      [[ -z "$sender_retrans" ]] && sender_retrans=-1
+      [[ -z "$local_retrans" ]] && local_retrans=-1
+      echo "[*] profile=$profile best_mbps=$mbps best_score=$score retrans=${sender_retrans}/${local_retrans} local_best=(cc=${cc:-?} qdisc=${qdisc:-?} win=${win:-?})"
+      SUMMARY_ROWS+="${profile}|${mbps}|${score}|${sender_retrans}|${local_retrans}|${cc}|${qdisc}|${win}|${out_file}|${report}"$'\n'
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$profile" "$mbps" "$score" "$sender_retrans" "$local_retrans" "$cc" "$qdisc" "$win" "$out_file" "$report" >> "$SUMMARY_TSV"
+      if awk "BEGIN {exit !(($score > $BEST_SCORE) || (($score == $BEST_SCORE) && ($mbps > $BEST_MBPS)))}"; then
         BEST_MBPS="$mbps"
+        BEST_SCORE="$score"
         BEST_PROFILE="$profile"
         BEST_LOG="$out_file"
       fi
     done
-    write_auto_all_summary_json "$SUMMARY_ROWS" "$BEST_PROFILE" "$BEST_MBPS" "$BEST_LOG"
-    print_auto_all_summary "$BEST_PROFILE" "$BEST_MBPS" "$BEST_LOG" "$SUMMARY_ROWS"
+    write_auto_all_summary_json "$SUMMARY_ROWS" "$BEST_PROFILE" "$BEST_MBPS" "$BEST_SCORE" "$BEST_LOG"
+    print_auto_all_summary "$BEST_PROFILE" "$BEST_MBPS" "$BEST_SCORE" "$BEST_LOG" "$SUMMARY_ROWS"
     echo "[*] 汇总 TSV: $SUMMARY_TSV"
     echo "[*] 汇总 JSON: $SUMMARY_JSON"
     if [[ -n "$BEST_PROFILE" && $REMOTE_TUNE -eq 1 ]]; then
