@@ -209,7 +209,7 @@ sudo ./iperf3-easy.sh \
 脚本会把本地最佳 sysctl 持久化到：
 
 ```bash
-/etc/sysctl.d/99-iperf3-reverse-singleflow-tune.conf
+/etc/sysctl.d/99-iperf3-client-tune.conf
 ```
 
 如果本地 sender 侧也参与了优化，还会额外写：
@@ -225,14 +225,12 @@ sudo ./iperf3-easy.sh \
 服务端目前会把远端最佳 sysctl / profile 相关配置写到：
 
 ```bash
-/etc/sysctl.d/99-iperf3-remote-tune.conf
-/etc/sysctl.d/99-iperf3-remote-profile.conf
+/etc/sysctl.d/99-iperf3-server-tune.conf
 ```
 
 也就是说：
 
-- 发送缓冲相关参数会持久化
-- 最佳拥塞控制 / qdisc 也会持久化
+- 发送缓冲、拥塞控制、qdisc 等服务端关键参数会合并持久化到同一个文件
 
 ---
 

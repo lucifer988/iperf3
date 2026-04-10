@@ -1351,7 +1351,7 @@ EOF_HELPER
 
 persist_best() {
     local bufmax="$1" best_cc="$2" best_qdisc="$3"
-    local sysctl_file="/etc/sysctl.d/99-iperf3-reverse-singleflow-tune.conf"
+    local sysctl_file="/etc/sysctl.d/99-iperf3-client-tune.conf"
     local svc_file="/etc/systemd/system/iperf3-qdisc.service"
     local tcp_def=$((1024*1024))
 
