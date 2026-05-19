@@ -368,11 +368,19 @@ sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
 sysctl -w net.core.netdev_max_backlog=16384 >/dev/null 2>&1 || true
 sysctl -w net.core.somaxconn=4096 >/dev/null 2>&1 || true
 
-# 优化 TCP 内存
-TCP_MEM_LOW=$((WMEM_MAX / 4096))
-TCP_MEM_PRESSURE=$((WMEM_MAX / 2048))
-TCP_MEM_HIGH=$((WMEM_MAX / 1024))
+# 优化 TCP 内存（更激进的计算）
+TCP_MEM_LOW=$((WMEM_MAX / 2048))
+TCP_MEM_PRESSURE=$((WMEM_MAX / 1024))
+TCP_MEM_HIGH=$((WMEM_MAX / 512))
 sysctl -w net.ipv4.tcp_mem="$TCP_MEM_LOW $TCP_MEM_PRESSURE $TCP_MEM_HIGH" >/dev/null 2>&1 || true
+
+# ECN 和初始拥塞窗口优化
+sysctl -w net.ipv4.tcp_ecn=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_init_cwnd=20 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_adv_win_scale=1 >/dev/null 2>&1 || true
+
+# CPU 分布优化
+sysctl -w net.core.rps_sock_flow_entries=32768 >/dev/null 2>&1 || true
 
 apply_profile "$PROFILE_CHOSEN"
 
@@ -413,9 +421,20 @@ net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_no_metrics_save=1
 
+# ECN 和拥塞窗口优化
+net.ipv4.tcp_ecn=1
+net.ipv4.tcp_init_cwnd=20
+net.ipv4.tcp_adv_win_scale=1
+
 # 连接队列
 net.core.netdev_max_backlog=16384
 net.core.somaxconn=4096
+
+# CPU 分布优化
+net.core.rps_sock_flow_entries=32768
+
+# TCP 内存（动态计算）
+net.ipv4.tcp_mem=$TCP_MEM_LOW $TCP_MEM_PRESSURE $TCP_MEM_HIGH
 EOF
   sysctl --system >/dev/null 2>&1 || true
   echo "[远程] 已持久化 sysctl 到 /etc/sysctl.d/99-iperf3-remote-tune.conf"
@@ -453,6 +472,32 @@ apply_profile() {
     else
       tc qdisc replace dev "$iface" root "$qdisc" >/dev/null 2>&1 || true
     fi
+    
+    # 优化网卡 offload（发送端优化TSO/GSO）
+    ethtool -K "$iface" tso on 2>/dev/null || true
+    ethtool -K "$iface" gso on 2>/dev/null || true
+    ethtool -K "$iface" gro on 2>/dev/null || true
+    ethtool -K "$iface" sg on 2>/dev/null || true
+    ethtool -K "$iface" tx on 2>/dev/null || true
+    
+    # 增大发送环形缓冲区
+    max_tx=$(ethtool -g "$iface" 2>/dev/null | awk '/^TX:/{getline; getline; print $2}' | head -1)
+    if [[ -n "$max_tx" && "$max_tx" =~ ^[0-9]+$ ]]; then
+      ethtool -G "$iface" tx "$max_tx" 2>/dev/null || true
+    fi
+    
+    # CPU 分布优化（发送端优化XPS）
+    cpu_count=$(nproc)
+    if (( cpu_count >= 8 )); then
+      xps_mask="ff"
+    elif (( cpu_count >= 4 )); then
+      xps_mask="0f"
+    else
+      xps_mask="03"
+    fi
+    for xps_file in /sys/class/net/"$iface"/queues/tx-*/xps_cpus; do
+      [[ -f "$xps_file" ]] && echo "$xps_mask" > "$xps_file" 2>/dev/null || true
+    done
   fi
   printf '%s\n' "$profile" > /tmp/iperf3_remote_profile.state
   echo "[远程] 切换到 profile=$profile cc=$cc qdisc=$qdisc iface=${iface:-unknown}"
@@ -694,6 +739,10 @@ SYSCTL_KEYS=(
   net.core.netdev_max_backlog
   net.core.somaxconn
   net.ipv4.tcp_mem
+  net.ipv4.tcp_ecn
+  net.ipv4.tcp_init_cwnd
+  net.ipv4.tcp_adv_win_scale
+  net.core.rps_sock_flow_entries
 )
 declare -A SYSCTL_OLD=()
 
@@ -893,6 +942,77 @@ sysctl_get() {
 sysctl_set() {
     local key="$1" value="$2"
     sysctl -w "$key=$value" >/dev/null
+}
+
+detect_optimal_mtu() {
+    local target="$1"
+    local mtu=1500
+    
+    # 使用 ping -M do 检测路径MTU（禁止分片）
+    for test_mtu in 1500 1492 1480 1460 1400 1350 1300; do
+        local payload=$((test_mtu - 28))  # IP(20) + ICMP(8)
+        if ping -M do -s "$payload" -c 3 -W 2 "$target" >/dev/null 2>&1; then
+            mtu=$test_mtu
+            break
+        fi
+    done
+    
+    echo "$mtu"
+}
+
+optimize_nic_offload() {
+    local iface="$1"
+    [[ -z "$iface" ]] && return 0
+    
+    # 备份当前offload设置
+    ETHTOOL_BACKUP=$(ethtool -k "$iface" 2>/dev/null | grep -E '^(rx-checksumming|tx-checksumming|scatter-gather|tcp-segmentation-offload|generic-segmentation-offload|generic-receive-offload|large-receive-offload):' || true)
+    
+    # 优化接收端offload（关键：GRO对接收性能影响最大）
+    ethtool -K "$iface" gro on 2>/dev/null || true
+    ethtool -K "$iface" lro on 2>/dev/null || true  # 部分网卡支持
+    ethtool -K "$iface" tso on 2>/dev/null || true
+    ethtool -K "$iface" gso on 2>/dev/null || true
+    ethtool -K "$iface" rx on 2>/dev/null || true
+    ethtool -K "$iface" tx on 2>/dev/null || true
+    ethtool -K "$iface" sg on 2>/dev/null || true
+    
+    # 增大网卡环形缓冲区（如果支持）
+    local max_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/{getline; getline; print $2}' | head -1)
+    if [[ -n "$max_rx" && "$max_rx" =~ ^[0-9]+$ ]]; then
+        ethtool -G "$iface" rx "$max_rx" 2>/dev/null || true
+    fi
+    
+    log "已优化 $iface 网卡offload和环形缓冲区"
+}
+
+optimize_cpu_distribution() {
+    local iface="$1"
+    [[ -z "$iface" ]] && return 0
+    
+    # 启用 RPS (Receive Packet Steering) - 将接收处理分散到多核
+    local cpu_count=$(nproc)
+    local rps_mask
+    
+    if (( cpu_count >= 8 )); then
+        rps_mask="ff"  # 使用8个核心
+    elif (( cpu_count >= 4 )); then
+        rps_mask="0f"  # 使用4个核心
+    else
+        rps_mask="03"  # 使用2个核心
+    fi
+    
+    # 为所有RX队列设置RPS
+    for rps_file in /sys/class/net/"$iface"/queues/rx-*/rps_cpus; do
+        [[ -f "$rps_file" ]] && echo "$rps_mask" > "$rps_file" 2>/dev/null || true
+    done
+    
+    # 启用 RFS (Receive Flow Steering) - 将同一流的包发到同一CPU
+    sysctl_set net.core.rps_sock_flow_entries 32768
+    for rps_flow_file in /sys/class/net/"$iface"/queues/rx-*/rps_flow_cnt; do
+        [[ -f "$rps_flow_file" ]] && echo 2048 > "$rps_flow_file" 2>/dev/null || true
+    done
+    
+    log "已优化 $iface 的 RPS/RFS CPU分布"
 }
 
 backup_sysctls() {
@@ -1150,15 +1270,39 @@ apply_receiver_profile() {
     sysctl_set net.ipv4.tcp_slow_start_after_idle 0  # 关键：避免空闲后慢启动
     sysctl_set net.ipv4.tcp_fastopen 3  # 启用 TFO (客户端+服务端)
     
+    # ECN 显式拥塞通知（配合BBR减少丢包）
+    sysctl_set net.ipv4.tcp_ecn 1  # 启用ECN协商
+    
+    # 初始拥塞窗口优化（RFC 6928推荐10，我们设置更激进）
+    sysctl_set net.ipv4.tcp_init_cwnd 20
+    
     # 增大连接队列
     sysctl_set net.core.netdev_max_backlog 16384
     sysctl_set net.core.somaxconn 4096
     
-    # 优化 TCP 内存分配
-    local tcp_mem_low=$((bufmax / 4096))
-    local tcp_mem_pressure=$((bufmax / 2048))
-    local tcp_mem_high=$((bufmax / 1024))
+    # 优化 TCP 内存分配（更激进的计算）
+    local tcp_mem_low=$((bufmax / 2048))
+    local tcp_mem_pressure=$((bufmax / 1024))
+    local tcp_mem_high=$((bufmax / 512))
     sysctl_set net.ipv4.tcp_mem "$tcp_mem_low $tcp_mem_pressure $tcp_mem_high"
+    
+    # 优化接收端性能
+    sysctl_set net.ipv4.tcp_adv_win_scale 1  # 减少应用层缓冲开销
+    
+    # MTU检测和网卡优化
+    if [[ -n "$SERVER" ]]; then
+        local optimal_mtu=$(detect_optimal_mtu "$SERVER")
+        log "检测到最优MTU: $optimal_mtu"
+        if [[ -n "$IFACE" ]]; then
+            ip link set dev "$IFACE" mtu "$optimal_mtu" 2>/dev/null || warn "设置MTU失败（非致命）"
+        fi
+    fi
+    
+    # 网卡offload和CPU分布优化
+    if [[ -n "$IFACE" ]]; then
+        optimize_nic_offload "$IFACE"
+        optimize_cpu_distribution "$IFACE"
+    fi
 }
 
 apply_local_sender_profile() {
@@ -1519,9 +1663,17 @@ net.ipv4.tcp_sack=1
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_fastopen=3
 
+# ECN 和拥塞窗口优化
+net.ipv4.tcp_ecn=1
+net.ipv4.tcp_init_cwnd=20
+net.ipv4.tcp_adv_win_scale=1
+
 # 连接队列
 net.core.netdev_max_backlog=16384
 net.core.somaxconn=4096
+
+# CPU 分布优化
+net.core.rps_sock_flow_entries=32768
 EOF
 
     if [[ "$SWEEP_LOCAL_SENDER" -eq 1 ]]; then
