@@ -27,7 +27,7 @@ iperf3 高速低重传优化工具 (v2)。
 ## 安装
 
 ```bash
-git clone <repo> iperf3-tune
+git clone https://github.com/lucifer988/iperf3.git iperf3-tune
 cd iperf3-tune
 sudo ./install.sh
 ```
