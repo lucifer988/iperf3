@@ -975,30 +975,6 @@ sudo iperf3-tune bench \
 
 ---
 
-## 更新日志
-
-### v2.1.0
-
-* 修复 TCP 重传率始终显示 `0.000%` 的问题。
-* TCP 模式下改用 `bytes / MSS` 估算总 TCP 段数。
-* 输出原始重传次数，例如 `重传 1234 次 (0.123%)`。
-* 新增 `--mss N` 参数，适配不同 MTU / jumbo frame 场景。
-* `--verbose` 模式保留 iperf3 原始 JSON。
-* `state.json` / `progress.json` 新增 `retransmits`、`est_segments`、`bytes_sent` 字段。
-
-### v2.0
-
-* 新增 `--detach` 后台运行。
-* 新增 `watch`、`tail`、`stop` 子命令。
-* 支持进度增量保存。
-* SSH 密码改用 `SSHPASS` 环境变量传递。
-* ethtool 解析改为段头定位，避免固定行偏移。
-* 引入多档中位数寻优。
-* 引入评分函数 `bandwidth × (1 - k × retrans_rate)`。
-* sysctl 支持精确备份和回退。
-
----
-
 ## License
 
 MIT
