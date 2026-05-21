@@ -1,4 +1,4 @@
-# iperf3-tune
+# iperf3
 
 <p align="center">
   <strong>面向高带宽链路的 iperf3 自动调优与基准测试工具</strong>
