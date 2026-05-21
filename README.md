@@ -1,4 +1,4 @@
-# iperf3-tune
+# iperf3
 
 一套自动化的 iperf3 网络性能调优工具。
 
