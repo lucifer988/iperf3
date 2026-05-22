@@ -155,12 +155,25 @@ median() {
 detect_distro() {
     local distro="unknown" pkg_mgr=""
 
+    # 解析 /etc/os-release 而不是 source 它. 原因:
+    # 1) 文件里的 VERSION="..." 会与脚本顶部的 `readonly VERSION` 冲突, 报
+    #    "VERSION: readonly variable" 并中断后续赋值, 让 ID/ID_LIKE 拿不到
+    # 2) 其他变量 (HOME_URL, BUG_REPORT_URL...) 也会污染脚本命名空间
+    _read_os_release_field() {
+        awk -v key="$1" -F= '
+            $1 == key {
+                v = $0; sub(/^[^=]*=/, "", v); gsub(/^["'\'']|["'\'']$/, "", v)
+                print v; exit
+            }
+        ' /etc/os-release 2>/dev/null
+    }
+
     if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        local ID="" ID_LIKE=""
-        . /etc/os-release
-        local id_lower="${ID,,}"
-        local id_like_lower="${ID_LIKE,,}"
+        local _id _idlike
+        _id=$(_read_os_release_field ID)
+        _idlike=$(_read_os_release_field ID_LIKE)
+        local id_lower="${_id,,}"
+        local id_like_lower="${_idlike,,}"
 
         case "$id_lower" in
             debian|ubuntu|raspbian|linuxmint|kali|elementary|pop|deepin|zorin|mx|parrot|tuxedo|neon|peppermint|lmde)
