@@ -99,8 +99,19 @@ vlog() { [[ $VERBOSE -eq 1 ]] && log "$@" || true; }
 
 on_err() {
     local rc=$?
-    local line=${BASH_LINENO[0]:-?}
-    err "脚本在第 ${line} 行失败 (exit=${rc})"
+    local frames=$(( ${#BASH_LINENO[@]} - 1 ))
+    if (( frames > 0 )); then
+        err "脚本失败 (exit=${rc}), 调用栈:"
+        local i
+        for (( i=0; i<frames; i++ )); do
+            local src="${BASH_SOURCE[i+1]:-?}"
+            local fn="${FUNCNAME[i+1]:-main}"
+            local ln="${BASH_LINENO[i]:-?}"
+            printf '  at %s (%s:%s)\n' "$fn" "$src" "$ln" >&2
+        done
+    else
+        err "脚本失败 (exit=${rc}) 于第 ${BASH_LINENO[0]:-?} 行"
+    fi
     exit "$rc"
 }
 trap on_err ERR
@@ -1769,6 +1780,9 @@ parse_args() {
     (( DURATION < 5 )) && die "--time 不能小于 5 秒"
     [[ "$REPEATS" =~ ^[0-9]+$ ]] || die "--repeats 必须是正整数"
     (( REPEATS < 1 )) && die "--repeats 不能小于 1"
+
+    # 防止函数末尾的 (( ... )) 在表达式为 0 时返回 1, 触发 ERR trap
+    return 0
 }
 
 # ---------------------------------------------------------------------------

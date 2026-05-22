@@ -37,6 +37,7 @@ say()  { printf '%s==>%s %s\n' "${C_GREEN}" "${C_RESET}" "$*"; }
 warn() { printf '%s!! %s%s\n' "${C_YELLOW}" "$*" "${C_RESET}"; }
 die()  { printf '%sERROR:%s %s\n' "${C_RED}" "${C_RESET}" "$*"; exit 1; }
 
+[[ "$(uname -s)" == "Linux" ]] || die "本工具依赖 sysctl / ethtool / procfs / sysfs, 仅支持 Linux (当前: $(uname -s))"
 [[ $EUID -eq 0 ]] || die "需要 root: sudo $0 $*"
 
 # 1) 检测系统
