@@ -1249,6 +1249,8 @@ ssh_remote() {
 }
 
 # 上传文件到远端. 用法: scp_to_remote <local> <remote>
+# OpenSSH 9.0+ scp 默认走 SFTP, 远端无 sftp-server 会失败.
+# 先尝试 -O (强制旧 SCP 协议), 不识别 -O 的更老 scp 再 fallback 到默认.
 scp_to_remote() {
     local src="$1" dst="$2"
     local -a sshargs
@@ -1266,13 +1268,32 @@ scp_to_remote() {
         fi
     done
 
-    if [[ -n "$SSH_PASS" ]]; then
-        SSHPASS="$SSH_PASS" sshpass -e scp "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
-    elif [[ -n "$SSH_PASS_FILE" ]]; then
-        sshpass -f "$SSH_PASS_FILE" scp "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
-    else
-        scp "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
+    _do_scp() {
+        local -a extra=("$@")
+        if [[ -n "$SSH_PASS" ]]; then
+            SSHPASS="$SSH_PASS" sshpass -e scp "${extra[@]}" "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
+        elif [[ -n "$SSH_PASS_FILE" ]]; then
+            sshpass -f "$SSH_PASS_FILE" scp "${extra[@]}" "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
+        else
+            scp "${extra[@]}" "${scpargs[@]}" "$src" "${SSH_USER}@${SSH_HOST}:${dst}"
+        fi
+    }
+
+    local err_out rc
+    err_out=$(_do_scp -O 2>&1); rc=$?
+    if (( rc == 0 )); then
+        return 0
     fi
+    # -O 选项在 OpenSSH < 8.7 不存在, 回退到默认 (走 SFTP)
+    if [[ "$err_out" == *"unknown option"* || "$err_out" == *"invalid option"* ]]; then
+        vlog "scp -O 不识别, 回退默认协议"
+        _do_scp
+        return $?
+    fi
+    # 是 -O 之外的失败, 直接报错 + 上下文
+    err "scp 上传失败 (exit=$rc):"
+    printf '%s\n' "$err_out" | sed 's/^/  | /' >&2
+    return "$rc"
 }
 
 # 远端同步调优. 这是 optimize 流程的步骤 3/4
@@ -1282,13 +1303,19 @@ remote_tune() {
 
     log "${C_BOLD}========== 远端 ${SSH_HOST} 应用同等优化 ==========${C_RESET}"
 
-    # 1) 探测远端 SSH 是否可达
-    if ! ssh_remote "echo OK" >/dev/null 2>&1; then
-        err "无法 SSH 到远端 ${SSH_USER}@${SSH_HOST}:${SSH_PORT}"
+    # 1) 探测远端 SSH 是否可达 (保留 stderr 以便诊断)
+    local probe_err probe_rc
+    probe_err=$(ssh_remote "echo OK" 2>&1 >/dev/null); probe_rc=$?
+    if (( probe_rc != 0 )); then
+        err "无法 SSH 到远端 ${SSH_USER}@${SSH_HOST}:${SSH_PORT} (exit=$probe_rc)"
+        if [[ -n "$probe_err" ]]; then
+            err "  SSH 报错:"
+            printf '%s\n' "$probe_err" | sed 's/^/    | /' >&2
+        fi
         err "  请检查:"
-        err "    1) 网络连通性 (ping/telnet)"
-        err "    2) SSH 密钥或密码是否正确"
-        err "    3) 防火墙是否放行"
+        err "    1) 网络 / 防火墙 (ping / telnet 目标端口)"
+        err "    2) 密钥或密码是否正确"
+        err "    3) 远端 sshd 是否允许该用户登录 (PermitRootLogin / PasswordAuthentication)"
         return 1
     fi
 
@@ -1297,23 +1324,38 @@ remote_tune() {
     # 2) 上传脚本到远端
     log "上传脚本到远端 ${remote_script}"
     if ! scp_to_remote "$SCRIPT_PATH" "$remote_script"; then
-        err "scp 上传失败"
+        err "scp 上传失败 (见上方 scp 错误)"
         return 1
     fi
-    ssh_remote "chmod 755 $remote_script" || true
+    ssh_remote "chmod 755 $remote_script" >/dev/null 2>&1 || true
 
     # 3) ★ v2.3.0 关键: 在远端运行 tune. 远端脚本会自动安装缺失依赖
+    # 注意: 用 'bash <path>' 而非直接调路径, 避免远端 /tmp 是 noexec 时无法执行
     log "在远端执行 tune --profile=${PROFILE} (含自动装依赖)"
     local rcmd
-    rcmd="$remote_script tune --profile ${PROFILE} --congestion ${CONGESTION} --yes"
+    rcmd="bash $remote_script tune --profile ${PROFILE} --congestion ${CONGESTION} --yes"
     [[ $VERBOSE -eq 1 ]] && rcmd="$rcmd --verbose"
     # AUTO_INSTALL 默认就开着, 显式带上以防万一
     [[ $AUTO_INSTALL -eq 0 ]] && rcmd="$rcmd --no-auto-install"
 
-    if ssh_remote "$rcmd" >&2; then
-        ok "远端 tune 已完成"
+    # 同时把远端输出落盘 + 实时回放到本地 stderr, 失败时打印最后几行
+    local remote_log="${LOG_DIR}/remote-tune.$(date +%s).log"
+    local rc=0
+    ssh_remote "$rcmd" 2>&1 | tee "$remote_log" >&2 || rc=${PIPESTATUS[0]}
+    if (( rc == 0 )); then
+        ok "远端 tune 已完成 (日志: $remote_log)"
     else
-        err "远端 tune 执行失败"
+        err "远端 tune 执行失败 (exit=$rc)"
+        err "  完整远端日志: $remote_log"
+        if [[ -s "$remote_log" ]]; then
+            err "  最后 20 行:"
+            tail -20 "$remote_log" | sed 's/^/    | /' >&2
+        fi
+        err "  常见原因:"
+        err "    - 远端无 root / sudo 跑 (require_root 失败)"
+        err "    - 远端无法装依赖 (apt/yum 源不通)"
+        err "    - 远端容器没暴露 /proc/sys 写权限"
+        err "    - 远端 /tmp 是 noexec 且没装 bash"
         return 1
     fi
 
