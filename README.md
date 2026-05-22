@@ -1,97 +1,10 @@
-# iperf3-tune
+# iperf3-tune 使用说明
 
-**面向高带宽链路的 iperf3 自动调优与基准测试工具**
-
-`iperf3-tune` 是一个用于 **检测瓶颈、应用 TCP/网卡调优、运行 iperf3 多流寻优、后台监控与回退** 的 Linux 工具。它的核心目标是：
-
-> 在 iperf3 场景下尽可能提升带宽 (尤其单流 `-R` 下行), 并尽可能降低 TCP 重传率。
-
-相比保守型系统优化工具,本项目会主动调整 sysctl、网卡 offload、ring buffer、RPS/RFS/XPS、IRQ 亲和性等参数。因此它更适合裸金属、高速 VPS、跨机房链路、长肥管道、10G/25G+ 链路等场景。
+面向高带宽链路的 iperf3 自动调优与基准测试工具。在 root 下修改本机 sysctl / 网卡 offload / ring / RPS, 并可通过 SSH 把同一套调优同步到远端 iperf3 服务端。
 
 ---
 
-## v2.3.0 关键变更
-
-1. **★★★ 远端依赖自动安装**
-   远端 SSH 同步调优时,若远端缺少 `ethtool`、`jq`、`iperf3` 等依赖,会**自动识别发行版并安装**,不再因为"远端 tune 执行失败"中断流程。
-
-   支持的发行版与包管理器:
-   - Debian/Ubuntu/Mint/Kali/Pop/Deepin → `apt`
-   - RHEL/CentOS/Rocky/Alma/Fedora/Amazon/Oracle/openEuler → `dnf`/`yum`
-   - Arch/Manjaro/EndeavourOS/Garuda → `pacman`
-   - Alpine → `apk`
-   - openSUSE/SLES → `zypper`
-
-2. **★★★ 本机依赖也自动安装**
-   `iperf3-tune` 在 root 下检测到缺失依赖会自动安装(可用 `--no-auto-install` 关闭)。
-
-3. **★ aggressive profile 单流友好优化**
-   针对 `iperf3 -R` 单流场景,放宽:
-   - `tcp_notsent_lowat`: 128 KB → 4 MB (减少单流阻塞)
-   - `tcp_limit_output_bytes`: 1 MB → 4 MB (减少 BBR pacing 抖动)
-
-4. **★ extreme profile 增强**
-   - `tcp_notsent_lowat`: 16 MB
-   - `tcp_limit_output_bytes`: 16 MB
-
-5. **新参数** `--no-auto-install`: 显式禁用自动安装。
-
----
-
-## 调优原理 (面向单流 `iperf3 -R`)
-
-`iperf3 -R` 意味着 client 接收、server 发送。要最大化客户端读到的速率,需要在**两端**做好以下事情:
-
-### 服务端 (sender / 发送侧)
-| 参数 | 作用 |
-|---|---|
-| `net.core.wmem_max`, `net.ipv4.tcp_wmem` | 增大发送缓冲,允许 BDP 内全部在飞 |
-| `net.ipv4.tcp_limit_output_bytes` | BBR pacing 限制,过小会卡单流 |
-| `net.ipv4.tcp_notsent_lowat` | 应用层 vs 内核 buffer 节流阈值 |
-| `tcp_congestion_control = bbr` | 单流跨网最佳拥塞控制 |
-| `default_qdisc = fq` | BBR 必需的发送排队 |
-| `tcp_slow_start_after_idle = 0` | 空闲后不重置 cwnd |
-| TSO / GSO offload | 硬件分段,降低 CPU |
-| TX ring buffer 拉满 | 减少 ring 溢出 |
-
-### 客户端 (receiver / 接收侧)
-| 参数 | 作用 |
-|---|---|
-| `net.core.rmem_max`, `net.ipv4.tcp_rmem` | 增大接收缓冲,这是单流上限的硬决定因素 |
-| `net.ipv4.tcp_moderate_rcvbuf = 1` | 内核自适应 rmem |
-| GRO offload | 硬件合并小包 |
-| RX ring buffer 拉满 | 减少 ring 溢出 |
-| RPS/RFS | 软件 fanout 到多核, 单 RX 队列网卡尤其重要 |
-
-### 两端共享
-| 参数 | 作用 |
-|---|---|
-| `tcp_window_scaling = 1` | 不开就只能 64 KB 窗口 |
-| `tcp_timestamps = 1` | 准确测 RTT |
-| `tcp_sack = 1`, `tcp_dsack = 1` | 选择性重传,避免整窗重传 |
-| `tcp_mtu_probing = 1` | 自适应 PMTU |
-
-### 不调的事情
-- iperf3 命令行 `-w` 显式窗口大小:**不建议**,会关掉内核 autotune,反而限速。靠 `tcp_rmem`/`tcp_wmem` 让内核自适应。
-- `--cport` 之类 niche 参数:与速率无关。
-- `-Z` (zerocopy):仅 server side 发送,可减 CPU 但不增速率,且对部分内核有兼容问题。
-
----
-
-## 项目结构
-
-```
-iperf3-tune/
-├── install.sh            # 一键安装
-├── uninstall.sh          # 完整卸载
-├── iperf3-tune.sh        # 主脚本 (detect/tune/bench/optimize/rollback/status)
-├── iperf3-tuned.sh       # daemon (init/install/run/canary)
-└── README.md             # 本文件
-```
-
----
-
-## 安装
+## 1. 安装
 
 ```bash
 git clone https://github.com/lucifer988/iperf3.git iperf3-tune
@@ -100,265 +13,301 @@ sudo ./install.sh
 ```
 
 `install.sh` 会:
-- 自动识别发行版,装好 `jq iperf3 ethtool iproute2 sysstat bc tar` 等
-- 加载 `tcp_bbr` 模块
-- 把 `iperf3-tune` 与 `iperf3-tuned` 装到 `/usr/local/sbin/`
-- 创建 `/etc/iperf3-tune/`, `/var/lib/iperf3-tune/`, `/var/log/iperf3-tune/`
+
+- 检测发行版, 自动安装 `jq iperf3 ethtool iproute2 sysstat bc tar iputils`
+  - 支持 Debian/Ubuntu (apt), RHEL/CentOS/Rocky/Alma/Fedora/Amazon (dnf/yum), Arch/Manjaro (pacman), Alpine (apk), openSUSE/SLES (zypper)
+- 加载 `tcp_bbr` 内核模块
+- 把 `iperf3-tune` 和 `iperf3-tuned` 安装到 `/usr/local/sbin/`
+- 创建 `/etc/iperf3-tune/` `/var/lib/iperf3-tune/` `/var/log/iperf3-tune/`
+
+安装完只支持 Linux, macOS / WSL 上 `install.sh` 会直接报错并退出。
 
 验证:
+
 ```bash
-iperf3-tune --version    # 2.3.0
+iperf3-tune --version    # 应输出 2.3.0
 iperf3-tune --help
 ```
 
----
-
-## 快速开始
-
-### 第 1 步:远端跑 iperf3 server
-```bash
-# 远端
-iperf3 -s -p 5201
-# 或让 optimize 替你拉起 (会自动尝试)
-```
-
-放行 TCP 5201 (firewalld / ufw / iptables 任意一种)。
-
-### 第 2 步:本机检测瓶颈
-```bash
-sudo iperf3-tune detect
-```
-只读不改。
-
-### 第 3 步:完整优化 (推荐 `--detach`,SSH 断也不丢任务)
-```bash
-sudo iperf3-tune optimize --detach \
-    --server 1.2.3.4 \
-    --ssh-host 1.2.3.4 --ssh-user root --ssh-key ~/.ssh/id_rsa \
-    --profile aggressive \
-    --time 30 --repeats 3
-```
-
-这条命令会:
-1. **检测**本机 CPU/内存/网卡瓶颈
-2. **本机调优**:写 `/etc/sysctl.d/99-iperf3-tune.conf` 并 `sysctl -p`, 调整网卡 offload/ring/RPS/RFS/XPS/IRQ
-3. **远端同步**:SCP 上传脚本,SSH 执行 `iperf3-tune tune` (★ 远端缺依赖会自动装)
-4. **测试**:单流基准 + 多流寻优 (1/2/4/8/16/32) + 链路诊断
-
-### 第 4 步:查看进度与结果
-```bash
-sudo iperf3-tune watch     # 实时进度
-sudo iperf3-tune tail      # 跟随日志
-sudo iperf3-tune status    # 最近一次结果
-sudo iperf3-tune stop      # 中断后台任务
-```
+> `sshpass` 不在安装清单里, 属按需依赖。当你**首次**使用 `--ssh-pass` / `--ssh-pass-file` 时, root 下会自动装上; 非 root 或加了 `--no-auto-install` 则会报"使用 SSH 密码认证需要 sshpass, 但未安装"。
 
 ---
 
-## 命令总览
+## 2. 命令一览
 
 ### `iperf3-tune` 主命令
 
-| 命令 | 改系统 | 说明 |
+| 命令 | 是否改本机 | 说明 |
 |---|---|---|
-| `detect` | 否 | 检测 CPU/内存/网卡瓶颈 |
+| `detect` | 否 | 只检测 CPU / 内存 / 网卡瓶颈 |
 | `tune` | 是 | 仅应用本机 sysctl + 网卡优化 |
-| `bench` | 否 | 仅跑 iperf3 测试 |
-| `optimize` | 是 | 完整流程:检测+调优+远端+测试 |
-| `rollback` | 是 | 回退本机 sysctl,并尝试远端回退 |
-| `status` | 否 | 查看当前状态 |
-| `watch` | 否 | 实时查看后台任务进度 |
-| `tail` | 否 | 跟随后台日志 |
-| `stop` | 是 | 停止后台任务及 iperf3 子进程 |
+| `bench` | 否 | 仅跑 iperf3 测试 (需 `--server`) |
+| `optimize` | 是 | 完整流程: detect → 本机 tune → 远端 tune → bench |
+| `rollback` | 是 | 回退本机 sysctl, 如有 `--ssh-host` 也回退远端 |
+| `status` | 否 | 当前状态与最近一次结果 |
+| `watch` | 否 | 后台任务实时进度 |
+| `tail` | 否 | 跟随后台任务日志 |
+| `stop` | 是 | 停止后台任务及其 iperf3 子进程 |
 
-### `iperf3-tuned` daemon 命令
+`bench`、`optimize` 支持 `-d` / `--detach` 入后台, 适合 SSH 远程操作时避免会话断开。
 
-| 命令 | 说明 |
+### `iperf3-tuned` daemon
+
+`iperf3-tuned` 用 systemd timer 周期性重做 optimize, 配置只填一次。
+
+| 子命令 | 说明 |
 |---|---|
-| `init` | 初始化配置 (写 `/etc/iperf3-tune/config.json`) |
-| `install` | 安装 systemd timer:每周日 22:00 + 每 6h canary |
+| `init` | 交互式生成 `/etc/iperf3-tune/config.json` (含 SSH 凭据) |
+| `install` | 装 systemd timer: 每周日 22:00 跑一次 + 每 6h canary |
 | `uninstall` | 卸载 timer |
-| `run` | 立即跑一次完整 optimize |
+| `run` | 立刻按 config 跑一次完整 optimize |
 | `canary` | 手动金丝雀检查 |
-| `rollback` | 回退本机+远端 |
+| `rollback` | 按 config 回退本机 + 远端 |
 | `status` | daemon / baseline / canary 状态 |
 
 ---
 
-## 关键参数
+## 3. 第一次跑: 最小可用流程
+
+远端先起 iperf3 服务端:
+
+```bash
+# 在 1.2.3.4 上执行 (端口任选, 默认 5201)
+iperf3 -s -p 5201
+# 防火墙放行 TCP 5201
+```
+
+本机先做一次只读检测, 不改任何东西:
+
+```bash
+sudo iperf3-tune detect
+```
+
+只想测速、不改系统:
+
+```bash
+sudo iperf3-tune bench --server 1.2.3.4 --time 30 --repeats 3
+```
+
+完整流程 (检测 + 本机调优 + 远端调优 + 测试):
+
+```bash
+sudo iperf3-tune optimize --detach \
+    --server 1.2.3.4 \
+    --ssh-host 1.2.3.4 --ssh-user root --ssh-key ~/.ssh/id_rsa \
+    --profile aggressive --time 30 --repeats 3
+```
+
+加 `--detach` 入后台, 用 `sudo iperf3-tune watch` 看进度, `sudo iperf3-tune status` 看最终结果。
+
+---
+
+## 4. SSH 密码登录 (重点)
+
+远端调优需要 SSH。脚本支持三种鉴权方式, **互斥**, 同时配多个时**私钥优先**(因为脚本会强制 `PreferredAuthentications=publickey`, 密码会被 ssh 拒绝)。
+
+| 方式 | 参数 | 备注 |
+|---|---|---|
+| 私钥 | `--ssh-key PATH` | 推荐, 不需要 sshpass |
+| 密码 (命令行) | `--ssh-pass PASS` | 简单, 但 **明文出现在 `ps` / shell 历史** |
+| 密码 (文件) | `--ssh-pass-file PATH` | 推荐的密码方式, 文件权限须 600 或 400 |
+
+下面分别说密码登录的两种用法。
+
+### 4.1 用 `--ssh-pass` (一次性、不推荐长期使用)
+
+```bash
+sudo iperf3-tune optimize \
+    --server 1.2.3.4 \
+    --ssh-host 1.2.3.4 \
+    --ssh-user root \
+    --ssh-pass 'YourPasswordHere' \
+    --profile aggressive
+```
+
+注意点:
+
+1. 这条命令首次跑会触发自动安装 `sshpass` (Debian: `apt install sshpass`, RHEL: `yum install sshpass`, Arch: `pacman -S sshpass`, Alpine: `apk add sshpass`, openSUSE: `zypper install sshpass`)。
+2. **密码会出现在 `ps auxf` 输出和你的 shell 历史里**。建议:
+   - 临时操作可以用, 但跑完立刻 `history -d <行号>` 清掉
+   - 长期 / 脚本化 / 多次调用, 改用 `--ssh-pass-file`
+3. 如果密码包含 `$` `!` 等 shell 特殊字符, 用 **单引号** 包住, 不要用双引号。
+4. 实现层是 `SSHPASS="$密码" sshpass -e ssh ...` —— 密码不进命令行, 只通过环境变量传给 sshpass, 因此 `ps` 上看不到 *sshpass 子进程* 的密码, 但**仍能在你输入这条命令的 shell 的 ps 行里看到 `--ssh-pass`**。
+
+### 4.2 用 `--ssh-pass-file` (推荐)
+
+把密码写到文件里, 文件权限设成 600, 然后传文件路径:
+
+```bash
+# 1) 写密码文件 (umask 077 保证创建出来就是 600)
+umask 077
+printf '%s' 'YourPasswordHere' > ~/.iperf3_remote.pw
+chmod 600 ~/.iperf3_remote.pw
+
+# 2) 用文件鉴权
+sudo iperf3-tune optimize \
+    --server 1.2.3.4 \
+    --ssh-host 1.2.3.4 \
+    --ssh-user root \
+    --ssh-pass-file ~/.iperf3_remote.pw \
+    --profile aggressive
+```
+
+要点:
+
+1. **密码内容不要带末尾换行**。用 `printf '%s' '密码'` 而不是 `echo '密码'`, 否则末尾的 `\n` 也会被当成密码的一部分, 鉴权失败。
+2. 脚本会检查文件权限, 不是 600 或 400 时会打印警告但仍继续运行。**警告别忽略**, 你不想 `/home/<user>/.iperf3_remote.pw` 让别的用户读到。
+3. `sudo` 默认 `HOME=/root`, 所以 `~/.iperf3_remote.pw` 如果在 `/home/youruser/` 下, 用 sudo 跑可能找不到。用绝对路径稳妥:
+
+   ```bash
+   sudo iperf3-tune optimize ... --ssh-pass-file /home/youruser/.iperf3_remote.pw ...
+   ```
+
+4. `--ssh-pass` 和 `--ssh-pass-file` 都给的时候, `--ssh-pass` 优先。
+
+### 4.3 走 daemon: 密码存进 config
+
+如果你打算长期周期性跑, 用 `iperf3-tuned init`:
+
+```bash
+sudo iperf3-tuned init
+# 它会交互式问:
+#   iperf3 服务端 IP:                  1.2.3.4
+#   ...
+#   远端 SSH 主机 IP (回车跳过):       1.2.3.4
+#     SSH 用户 [root]:                 root
+#     认证方式 [1=密码 2=私钥] [1]:    1
+#     SSH 密码:                        (输入时不回显)
+```
+
+密码以**明文**存入 `/etc/iperf3-tune/config.json`, 文件权限自动 600。之后:
+
+```bash
+sudo iperf3-tuned install   # 装 systemd timer
+sudo iperf3-tuned run       # 立即跑一次
+sudo iperf3-tuned status    # 查状态
+```
+
+要修改密码, 重跑 `sudo iperf3-tuned init` 即可。
+
+### 4.4 默认 SSH 选项 (脚本写死, 知道一下)
+
+不管哪种鉴权, 脚本都强制下列 ssh 选项:
+
+```
+-o StrictHostKeyChecking=no       # 不交互问 host key, 自动接受
+-o UserKnownHostsFile=/dev/null   # 不写 known_hosts
+-o ConnectTimeout=10              # 10s 连不上就失败
+-o ServerAliveInterval=15
+-o ServerAliveCountMax=4          # 60s 静默就断
+-o LogLevel=ERROR
+```
+
+如果你的远端做了**端口非 22**, 加 `--ssh-port N`。
+
+### 4.5 密码登录常见错误
+
+| 现象 | 原因 |
+|---|---|
+| `使用 SSH 密码认证需要 sshpass, 但未安装` | 非 root 跑, 或加了 `--no-auto-install`。手动 `apt/yum/pacman install sshpass` |
+| `Permission denied (publickey)` | 同时给了 `--ssh-key` 和 `--ssh-pass`, ssh 被强制成 publickey 模式。**二选一** |
+| `Permission denied (publickey,password)` 但密码确实对 | 远端 `sshd_config` 把 `PasswordAuthentication` 关了, 改 `yes` 后 `systemctl restart sshd` |
+| `--ssh-pass-file` 鉴权失败但密码看起来对 | 文件末尾有换行 / BOM。用 `printf '%s'` 重写, 或 `xxd 文件名` 看末尾是不是 `0a` |
+| `无法 SSH 到远端` | 网络 / 防火墙 / `--ssh-port` 不对。先 `ssh -p N user@host` 手动试一次 |
+
+---
+
+## 5. 常用参数速查
 
 ### 测试参数
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--server IP` | — | iperf3 服务端 (bench/optimize 必填) |
+| `--server IP` | — | iperf3 服务端 IP (`bench` / `optimize` 必填) |
 | `--port N` | 5201 | iperf3 端口 |
-| `--time SECS` | 30 | 单次测试时长,≥5 |
-| `--repeats N` | 3 | 每档重复次数,取中位 |
+| `--time SECS` | 30 | 单次测试时长, ≥5 |
+| `--repeats N` | 3 | 每档重复次数, 取中位 |
 | `--max-parallel N` | 32 | 最大并发流 |
 | `--direction reverse\|forward` | reverse | reverse = `-R` 下行测试 |
-| `--mss N` | 1448 | 估算重传率用 MSS |
+| `--mss N` | 1448 | 估算重传率用的 MSS |
 
 ### 调优参数
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--profile NAME` | aggressive | balanced/aggressive/extreme |
-| `--congestion ALGO` | bbr | bbr / cubic / 其他 |
-| `--retrans-threshold PCT` | 3.0 | 超此值提前停止寻优 |
-| `--retrans-penalty K` | 10.0 | 评分函数重传惩罚 |
+| `--profile NAME` | aggressive | `balanced` (64 MB 缓冲, 1G/2.5G) / `aggressive` (256 MB, 10G) / `extreme` (1 GB, 25G+) |
+| `--congestion ALGO` | bbr | TCP 拥塞控制算法 |
+| `--retrans-threshold PCT` | 3.0 | 重传率超此值时提前停止寻优 |
+| `--retrans-penalty K` | 10.0 | 评分函数对重传的惩罚系数 |
 
-### SSH (远端同步)
+### SSH 参数
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--ssh-host HOST` | — | 远端 IP |
 | `--ssh-user USER` | root | SSH 用户 |
 | `--ssh-port N` | 22 | SSH 端口 |
-| `--ssh-key PATH` | — | 私钥 |
-| `--ssh-pass PASS` | — | 密码 (经 sshpass) |
-| `--ssh-pass-file PATH` | — | 从文件读密码 (推荐,权限须 600) |
+| `--ssh-key PATH` | — | SSH 私钥路径 |
+| `--ssh-pass PASS` | — | SSH 密码 (走 sshpass, 见 §4.1) |
+| `--ssh-pass-file PATH` | — | SSH 密码文件 (推荐, 见 §4.2) |
 
-### 后台与依赖管理
+### 其他
+
 | 参数 | 说明 |
 |---|---|
-| `-d`, `--detach` | bench/optimize 入后台,脱离 SSH |
-| `--no-auto-install` | **新增**:禁用自动安装依赖 |
-| `-y`, `--yes` | 非交互,跳过确认 |
+| `-d`, `--detach` | `bench` / `optimize` 后台运行 |
+| `-y`, `--yes` | 非交互, 跳过确认 |
 | `-v`, `--verbose` | 详细日志 + 保留 iperf3 原始 JSON |
 | `--json` | JSON 输出 |
+| `--no-auto-install` | 不自动装缺失依赖 |
+| `-h`, `--help` | 显示帮助 |
+| `-V`, `--version` | 显示版本 |
 
 ---
 
-## profile 三档
+## 6. 后台运行与日志
 
-| Profile | 缓冲区 | 适用 | 风险 |
-|---|---|---|---|
-| `balanced` | 64 MB | 1G/2.5G,共享机器 | 低 |
-| `aggressive` | 256 MB | 10G,默认推荐,**针对单流 -R 优化** | 中 |
-| `extreme` | 1 GB | 25G+,长肥管道 | 高 (关 ECN/RPF) |
+`--detach` 模式下:
 
----
+- PID 写在 `/var/lib/iperf3-tune/iperf3-tune.pid`
+- 日志在 `/var/log/iperf3-tune/run-<时间戳>.log`
+- 进度增量写到 `/var/lib/iperf3-tune/progress.json`
 
-## 寻优算法
-
-### 候选并发数
-默认 `1, 2, 4, 8, 16, 32`,受 `--max-parallel` 限制。
-
-### 评分函数
-\[
-\text{score} = \text{bandwidth\_mbps} \times \max(0,\ 1 - k \times \text{retrans\_rate\_pct} / 100)
-\]
-
-其中 \(k\) = `--retrans-penalty` (默认 10)。即 1% 重传率扣 10% 评分。
-
-如果你**只看带宽**,设 `--retrans-penalty 0`。
-
-### 早停
-- 单流外的某档重传率 > `--retrans-threshold` (默认 3.0%) → 停止
-- 单流允许 ≤ 10% 重传 (因为多流可能改善)
-- 当前评分 < 前一档 95% → 停止
-
----
-
-## 后台运行
-
-高速链路 `iperf3` 容易把 SSH 打卡顿甚至断开。所以建议:
+操作:
 
 ```bash
-sudo iperf3-tune optimize --detach ...
-```
-
-后台模式:
-- `setsid` 脱离 SSH controlling terminal
-- PID 写 `/var/lib/iperf3-tune/iperf3-tune.pid`
-- 日志在 `/var/log/iperf3-tune/run-*.log`
-- 每完成一档增量写 `/var/lib/iperf3-tune/progress.json`
-
-SSH 客户端 `~/.ssh/config`:
-```
-Host *
-    ServerAliveInterval 15
-    ServerAliveCountMax 6
-    TCPKeepAlive yes
+sudo iperf3-tune watch    # 实时进度
+sudo iperf3-tune tail     # 跟日志
+sudo iperf3-tune status   # 最近结果
+sudo iperf3-tune stop     # 中断 + 清子进程
 ```
 
 ---
 
-## 回退
+## 7. 回退与卸载
+
+回退本机调优:
 
 ```bash
-# 本机
 sudo iperf3-tune rollback
-
-# 本机 + 远端
-sudo iperf3-tune rollback \
-    --ssh-host 1.2.3.4 --ssh-key ~/.ssh/id_rsa
 ```
 
-`rollback` 做的事:
-- 删除 `/etc/sysctl.d/99-iperf3-tune.conf`
-- 把每个被改过的 sysctl 项还原到备份值
-- 远端如有部署也执行同样动作
+同时回退远端:
 
-> 部分 ethtool offload 改动(尤其 LRO)运行时不可逆,最干净的还原是 `rollback` + reboot。
+```bash
+sudo iperf3-tune rollback \
+    --ssh-host 1.2.3.4 \
+    --ssh-pass-file ~/.iperf3_remote.pw    # 或 --ssh-key / --ssh-pass
+```
 
----
-
-## 卸载
+完整卸载:
 
 ```bash
 sudo ./uninstall.sh
 ```
 
-会:
-1. 停 / 删 systemd timer
-2. `iperf3-tune rollback` 回退 sysctl
-3. 删脚本
+会执行 rollback、移除 systemd timer、删 `/usr/local/sbin/iperf3-tune{,d}`, 但保留配置 / 日志 / 历史数据。彻底清理:
 
-保留配置/日志/历史数据。彻底清理:
 ```bash
 sudo rm -rf /etc/iperf3-tune /var/lib/iperf3-tune /var/log/iperf3-tune
 ```
-
----
-
-## 常见问题
-
-### Q1: 报错 `远端 tune 执行失败` / `缺少依赖: ethtool` 怎么办?
-
-**v2.3.0 已修复**:远端会自动安装。如果你装的还是旧版,升级即可。如果新版仍失败,请贴日志:
-```
-sudo iperf3-tune optimize --verbose ...   # 看完整远端输出
-```
-
-可能原因:
-- 远端无外网,装不了包 → 手动安装依赖
-- 远端 root 都无权运行 `apt`/`yum` → 改用有权限的用户
-- 容器里的精简发行版没有包管理器 → 手动准备好镜像
-
-### Q2: 单流 `-R` 速度上不去?
-
-按这个顺序排查:
-1. `sudo iperf3-tune detect` 看瓶颈是 CPU/内存/网卡
-2. 看 RTT:`ping -c 20 server`,RTT × 带宽 = BDP,确保 `rmem_max` ≥ 2×BDP
-3. NIC 标称速率 (`/sys/class/net/<iface>/speed`) 是否被中间链路或 ISP 限制
-4. 试 `--profile extreme`(若内存足够,1 GB 缓冲)
-5. 服务端 / 客户端 **任一**没装 BBR → 退化为 cubic,长肥管道掉速
-
-### Q3: 重传率多少算正常?
-
-按 RTT 分:
-- LAN (RTT < 5ms): < 0.1% 正常,> 1% 有问题
-- 同区域 (RTT 5-50ms): < 1% 正常
-- 跨境 (RTT > 100ms): < 3% 正常,BBR 设计内
-
-### Q4: `iperf3 -R` 和不带 `-R` 有什么区别?
-
-- **不带 `-R` (forward / 上行)**:client 发,server 收。client 拼写入侧 (wmem)
-- **带 `-R` (reverse / 下行)**:server 发,client 收。**client 拼读出侧 (rmem),server 拼写入侧**
-
-本工具默认 `reverse`,如果你测的是上行,加 `--direction forward`。
-
----
-
-## License
-
-MIT
