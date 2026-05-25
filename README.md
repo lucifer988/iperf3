@@ -1,4 +1,4 @@
-# iperf3-tune 使用说明
+# iperf3-tune 使用说明(BBR+FQ)
 
 面向高带宽链路的 iperf3 自动调优与基准测试工具。在 root 下修改本机 sysctl / 网卡 offload / ring / RPS, 并可通过 SSH 把同一套调优同步到远端 iperf3 服务端。
 
